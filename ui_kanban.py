@@ -151,14 +151,18 @@ def render(ctx: dict) -> None:
                     sync_lists_from_data()
 
                 state_key = f"kb_state_{sid}"
-                # initialize selectbox state
-                if state_key not in st.session_state:
-                    st.session_state[state_key] = stt
+
+                # ✅ Streamlit rule: if you use session_state[key], do NOT also pass index/value.
+                # Initialize once (and keep valid), then let the widget read/write session_state.
+                current_state = (getattr(s, "state", "") or "").strip().upper() or stt
+                if current_state not in KANBAN_STATES:
+                    current_state = "PLANNED"
+                if (state_key not in st.session_state) or (st.session_state.get(state_key) not in KANBAN_STATES):
+                    st.session_state[state_key] = current_state
 
                 c_state.selectbox(
                     label="",
                     options=KANBAN_STATES,
-                    index=KANBAN_STATES.index(st.session_state[state_key]) if st.session_state[state_key] in KANBAN_STATES else 0,
                     key=state_key,
                     label_visibility="collapsed",
                     on_change=_set_state,
