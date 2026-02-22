@@ -25,12 +25,15 @@ def render(ctx: dict) -> None:
     progress_percent = ctx["progress_percent"]
     compute_done_composition = ctx["compute_done_composition"]
     forecast_eta = ctx["forecast_eta"]
+    compute_units_composition = ctx.get("compute_units_composition")
+    forecast_eta_units = ctx.get("forecast_eta_units")
+    series_total_units = ctx.get("series_total_units")
     capacity_summary = ctx.get("capacity_summary")
     week_window = ctx.get("week_window")
     employees = ctx.get("employees", [])
 
     st.title("Dashboard")
-    st.caption("Reporting: Capacity/Workload + Liste + Portfolio-Forecast.")
+    st.caption("Reporting: Capacity/Workload + Delivery speed (Velocity) + Runway/Burndown.")
 
     # =========================
     # Capacity / Workload
@@ -146,6 +149,90 @@ def render(ctx: dict) -> None:
                         )
                     if rows:
                         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    # =========================
+    # Delivery speed + Runway (units-based)
+    # =========================
+    with st.container(border=True):
+        st.subheader("Delivery speed & Runway")
+        st.caption("Selbsterklärend: *Delivery speed* = quittierte Units/Tag (letzte 10 Arbeitstage). *Runway* = verbleibende Units + Forecast-Enddatum.")
+
+        tasks_all = [s for s in visible_series() if is_task(s)]
+        if not tasks_all or not callable(compute_units_composition) or not callable(forecast_eta_units):
+            st.info("No velocity/burndown data (no tasks or missing functions).")
+        else:
+            # lightweight filters
+            portfolios = sorted({(getattr(s, "portfolio", "") or "Default").strip() or "Default" for s in tasks_all})
+            projects = sorted({(getattr(s, "project", "") or "").strip() for s in tasks_all if (getattr(s, "project", "") or "").strip()})
+            themes = sorted({(getattr(s, "theme", "") or "").strip() for s in tasks_all if (getattr(s, "theme", "") or "").strip()})
+            owners = sorted({(getattr(s, "owner", "") or "").strip() for s in tasks_all if (getattr(s, "owner", "") or "").strip()})
+
+            f1, f2, f3, f4, f5 = st.columns([2, 2, 2, 2, 2])
+            f_port = f1.multiselect("Portfolio", portfolios, default=[], key="dash_v_port")
+            f_proj = f2.multiselect("Project", projects, default=[], key="dash_v_proj")
+            f_theme = f3.multiselect("Theme", themes, default=[], key="dash_v_theme")
+            f_owner = f4.multiselect("Owner", owners, default=[], key="dash_v_owner")
+            win = int(f5.number_input("Window (workdays)", min_value=5, max_value=30, value=10, step=1, key="dash_v_win"))
+
+            def _ok(s):
+                if f_port and (getattr(s, "portfolio", "") or "Default").strip() not in f_port:
+                    return False
+                if f_proj and (getattr(s, "project", "") or "").strip() not in f_proj:
+                    return False
+                if f_theme and (getattr(s, "theme", "") or "").strip() not in f_theme:
+                    return False
+                if f_owner and (getattr(s, "owner", "") or "").strip() not in f_owner:
+                    return False
+                return True
+
+            tasks = [s for s in tasks_all if _ok(s)]
+            if not tasks:
+                st.info("No tasks match filters.")
+            else:
+                all_days, done_u, rem_u, _ = compute_units_composition(tasks)
+                anchor, vel, eta, dq = forecast_eta_units(all_days, done_u, rem_u, today, win)
+
+                # remaining today = value at last day <= today
+                rem_today = None
+                if all_days:
+                    idx = 0
+                    for i, d in enumerate(all_days):
+                        if d <= today:
+                            idx = i
+                        else:
+                            break
+                    rem_today = float(rem_u[idx]) if idx < len(rem_u) else 0.0
+                rem_today = float(rem_today or 0.0)
+
+                scope = 0.0
+                if callable(series_total_units):
+                    scope = float(sum(series_total_units(s) for s in tasks))
+                else:
+                    scope = float(len(tasks))
+
+                # data quality label
+                if dq >= max(3, win // 2):
+                    dq_label = "High"
+                elif dq >= 2:
+                    dq_label = "Med"
+                else:
+                    dq_label = "Low"
+
+                m1, m2, m3, m4 = st.columns([2, 2, 2, 3])
+                m1.metric("Remaining (units)", f"{rem_today:.1f}")
+                m2.metric("Delivery speed", f"{vel:.2f} units/day")
+                m3.metric("Forecast finish", eta.isoformat() if eta else "—")
+                m4.caption(f"Scope: {scope:.1f} units · Data quality: {dq_label} (done-days in window: {dq}/{win})")
+
+                if vel > 0 and rem_today > 0:
+                    import math
+
+                    days_needed = int(math.ceil(rem_today / vel))
+                    st.caption(f"At current speed: ~{days_needed} workdays remaining.")
+                elif rem_today <= 0:
+                    st.caption("Nothing remaining (already burned down).")
+                else:
+                    st.caption("No recent completions → delivery speed is 0. Forecast is not possible.")
 
     tasks = [s for s in visible_series() if is_task(s)]
     if not tasks:

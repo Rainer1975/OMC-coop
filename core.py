@@ -720,3 +720,222 @@ def capacity_summary(
     # stable ordering: high util first, then name
     out.sort(key=lambda x: (-float(x.get("util", 0.0)), str(x.get("owner", ""))))
     return out
+
+
+# =========================
+# Velocity / Burndown (units)
+# =========================
+def _safe_float(x: Any, default: float = 0.0) -> float:
+    try:
+        v = float(x)
+        if v != v:  # NaN
+            return default
+        return v
+    except Exception:
+        return default
+
+
+def business_day_range(start: date, end: date) -> List[date]:
+    """Return Mon–Fri days in [start,end]."""
+    if not isinstance(start, date) or not isinstance(end, date):
+        return []
+    if end < start:
+        return []
+    out: List[date] = []
+    d = start
+    while d <= end:
+        if d.weekday() < 5:
+            out.append(d)
+        d += timedelta(days=1)
+    return out
+
+
+def add_business_days(start: date, n: int) -> date:
+    """Add n business days (Mon–Fri) to start. n can be 0."""
+    if not isinstance(start, date):
+        start = date.today()
+    n = int(n)
+    if n <= 0:
+        return start
+    d = start
+    left = n
+    while left > 0:
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            left -= 1
+    return d
+
+
+def series_total_units(s: TaskSeries) -> float:
+    """Total units for a series.
+
+    Rule (per your decision):
+    - If explicit weight exists, use it.
+    - Else fallback to 1.
+    """
+    # 1) explicit weight in meta
+    meta = getattr(s, "meta", {}) or {}
+    w = _safe_float(meta.get("weight", None), default=0.0)
+    if w > 0:
+        return w
+
+    # 2) parts weight (if parts are used)
+    parts = getattr(s, "parts", []) or []
+    if parts:
+        sw = 0.0
+        for p in parts:
+            sw += _safe_float(getattr(p, "weight", 0.0), default=0.0)
+        if sw > 0:
+            return sw
+
+    # 3) fallback
+    return 1.0
+
+
+def series_units_per_business_day(s: TaskSeries) -> float:
+    """Distribute total units across business days in the series duration."""
+    st = getattr(s, "start", None)
+    en = getattr(s, "end", None)
+    if not isinstance(st, date) or not isinstance(en, date):
+        return 0.0
+    bdays = business_days_between(st, en)
+    if bdays <= 0:
+        return 0.0
+    return float(series_total_units(s)) / float(bdays)
+
+
+def compute_units_composition(task_series: List[TaskSeries]):
+    """Compute done units/day + remaining units/day over business days.
+
+    Done units/day are derived from done_days:
+    each DONE day contributes (total_units / business_days_in_task).
+
+    Returns:
+      all_days (business days), done_units_day, remaining_units_day, comp_by_day
+    """
+    tasks = [s for s in (task_series or []) if is_task(s)]
+    if not tasks:
+        return [], [], [], []
+
+    min_day = min(s.start for s in tasks)
+    max_day = max(s.end for s in tasks)
+
+    all_days = business_day_range(min_day, max_day)
+    if not all_days:
+        return [], [], [], []
+
+    done_units_day: List[float] = []
+    remaining_units_day: List[float] = []
+    comp_by_day: List[List[Dict[str, Any]]] = []
+
+    # precompute per-series constants
+    per_day: Dict[str, float] = {}
+    total_units: Dict[str, float] = {}
+    for s in tasks:
+        per_day[s.series_id] = series_units_per_business_day(s)
+        total_units[s.series_id] = float(series_total_units(s))
+
+    for day in all_days:
+        done_today = 0.0
+        comp: List[Dict[str, Any]] = []
+        rem_total = 0.0
+
+        for s in tasks:
+            st = s.start
+            en = s.end
+            if day < st:
+                rem_total += total_units[s.series_id]
+                continue
+            if day > en:
+                continue
+
+            # done units up to day
+            dd = getattr(s, "done_days", set()) or set()
+            done_upto = 0.0
+            for x in dd:
+                if not isinstance(x, date):
+                    continue
+                if st <= x <= day and x.weekday() < 5:
+                    done_upto += per_day[s.series_id]
+
+            # clamp to total
+            done_upto = min(done_upto, total_units[s.series_id])
+            rem_total += max(0.0, total_units[s.series_id] - done_upto)
+
+            if day in dd and day.weekday() < 5:
+                done_today += per_day[s.series_id]
+                comp.append(
+                    {
+                        "series_id": s.series_id,
+                        "owner": getattr(s, "owner", ""),
+                        "project": getattr(s, "project", ""),
+                        "task": getattr(s, "title", ""),
+                        "units": per_day[s.series_id],
+                    }
+                )
+
+        done_units_day.append(float(done_today))
+        remaining_units_day.append(float(rem_total))
+        comp_by_day.append(comp)
+
+    return all_days, done_units_day, remaining_units_day, comp_by_day
+
+
+def avg_last_window_float(values: List[float], end_idx: int, window: int) -> float:
+    if not values:
+        return 0.0
+    end_idx = max(0, min(end_idx, len(values) - 1))
+    window = max(1, int(window))
+    start = max(0, end_idx - window + 1)
+    chunk = values[start : end_idx + 1]
+    return float(sum(chunk)) / float(len(chunk)) if chunk else 0.0
+
+
+def forecast_eta_units(
+    all_days: List[date],
+    done_units_day: List[float],
+    remaining_units_day: List[float],
+    today_: date,
+    window_business_days: int = 10,
+):
+    """Forecast finish date based on remaining units and average done units/day.
+
+    - Anchor = last business day <= today with any done, else today
+    - Velocity = avg done units/day over last N business days ending at anchor
+    - ETA = anchor + ceil(remaining/velocity) business days
+    - Data quality = days with done>0 within window
+    """
+    if not all_days:
+        return None, 0.0, None, 0
+
+    # locate anchor index
+    last_le_today = 0
+    last_done = None
+    for i, dd in enumerate(all_days):
+        if dd <= today_:
+            last_le_today = i
+            if i < len(done_units_day) and float(done_units_day[i]) > 0.0:
+                last_done = i
+        else:
+            break
+
+    anchor_idx = last_done if last_done is not None else last_le_today
+    anchor_day = all_days[anchor_idx]
+    rem_anchor = float(remaining_units_day[anchor_idx]) if anchor_idx < len(remaining_units_day) else 0.0
+    vel = avg_last_window_float(done_units_day, anchor_idx, int(window_business_days))
+
+    # data quality
+    w = max(1, int(window_business_days))
+    start = max(0, anchor_idx - w + 1)
+    dq = sum(1 for v in done_units_day[start : anchor_idx + 1] if float(v) > 0.0)
+
+    if rem_anchor <= 0:
+        return anchor_day, 0.0, anchor_day, dq
+    if vel <= 0:
+        return anchor_day, 0.0, None, dq
+
+    import math
+
+    days_needed = int(math.ceil(rem_anchor / vel))
+    eta = add_business_days(anchor_day, days_needed)
+    return anchor_day, float(vel), eta, dq
