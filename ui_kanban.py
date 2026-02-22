@@ -132,8 +132,8 @@ def render(ctx: dict) -> None:
                 st.caption(_card_subline(s))
                 st.caption(_date_line(s))
 
-                # --- controls row: state dropdown + open detail + done today button
-                c_state, c_open, c_done = st.columns([6, 1, 1])
+                # --- controls row: state dropdown + actions (popover)
+                c_state, c_actions = st.columns([7, 2])
 
                 # STATE dropdown (persist on change)
                 def _set_state(series_id: str, key: str):
@@ -165,36 +165,33 @@ def render(ctx: dict) -> None:
                     args=(sid, state_key),
                 )
 
-                # OPEN detail
-                if c_open.button("›", key=f"kb_open_{sid}", help="Open in Detail"):
-                    open_detail(sid)
+                # Actions: reduce button clutter per card
+                with c_actions.popover("⋯", use_container_width=True):
+                    if st.button("Open details", key=f"kb_open_{sid}", use_container_width=True):
+                        open_detail(sid)
 
-                # DONE today toggle (THIS is your broken button in the screenshot)
-                done_today = _today_done(s, today)
-                is_future = today < s.start  # your rule: future disabled for DONE
-                disabled = bool(is_future)
+                    st.divider()
 
-                # Visual: filled dot if done today, red dot if not done today
-                # Keep minimal, no CSS games
-                label = "●" if not done_today else "○"
-                help_txt = "Mark today as DONE (needs confirmation)" if not done_today else "Remove DONE for today"
-                btn_key = f"kb_done_{sid}_{today.isoformat()}"
+                    # DONE today toggle
+                    done_today = _today_done(s, today)
+                    is_future = today < s.start  # your rule: future disabled for DONE
+                    disabled = bool(is_future)
 
-                if c_done.button(label, key=btn_key, help=help_txt, disabled=disabled):
-                    # If already done today -> remove immediately (correction)
-                    if done_today:
-                        try:
-                            unmark_done(s, today)
-                        except TypeError:
-                            # if signature differs, still try basic
-                            unmark_done(s, today)
-                        persist()
-                        st.rerun()
-                    else:
-                        # Request confirmation banner (your app already supports this)
-                        request_done_single(sid, today, reason="Kanban quick DONE")
-                        # request_done_single does st.rerun() internally; if not, ensure rerun
-                        st.rerun()
+                    label = "Mark DONE (today)" if not done_today else "Undo DONE (today)"
+                    help_txt = "Needs confirmation" if not done_today else "Remove DONE for today"
+                    btn_key = f"kb_done_{sid}_{today.isoformat()}"
+
+                    if st.button(label, key=btn_key, help=help_txt, disabled=disabled, use_container_width=True):
+                        if done_today:
+                            try:
+                                unmark_done(s, today)
+                            except TypeError:
+                                unmark_done(s, today)
+                            persist()
+                            st.rerun()
+                        else:
+                            request_done_single(sid, today, reason="Kanban quick DONE")
+                            st.rerun()
 
                 # small spacer
                 st.markdown("---")

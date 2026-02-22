@@ -572,3 +572,151 @@ def load_state(path: str) -> List[TaskSeries]:
         except Exception:
             continue
     return out
+
+
+# =========================
+# Capacity / Workload
+# =========================
+def business_days_between(start: date, end: date) -> int:
+    """Count Mon–Fri days in [start,end]."""
+    if not isinstance(start, date) or not isinstance(end, date):
+        return 0
+    if end < start:
+        return 0
+    n = 0
+    d = start
+    while d <= end:
+        if d.weekday() < 5:
+            n += 1
+        d += timedelta(days=1)
+    return n
+
+
+def week_window(today: date) -> tuple[date, date]:
+    """Return Monday..Sunday window for given day."""
+    if not isinstance(today, date):
+        today = date.today()
+    start = today - timedelta(days=today.weekday())
+    end = start + timedelta(days=6)
+    return start, end
+
+
+def _overlap_days(start_a: date, end_a: date, start_b: date, end_b: date) -> tuple[date, date, bool]:
+    """Return (start,end,has_overlap) for overlap of [a] and [b]."""
+    st = max(start_a, start_b)
+    en = min(end_a, end_b)
+    return st, en, (st <= en)
+
+
+def capacity_summary(
+    series_list: List[TaskSeries],
+    employees: List[Dict[str, Any]],
+    today: date,
+    window_start: Optional[date] = None,
+    window_end: Optional[date] = None,
+) -> List[Dict[str, Any]]:
+    """Compute Planned/Done/Remaining per owner for a date window.
+
+    Planned/Done/Remaining are counted in *business-day units*.
+    - Planned: business days in overlap of task and window
+    - Done: done_days inside window (business days)
+    - Remaining: max(Planned - Done, 0)
+
+    Capacity is business days in window (Mon–Fri). Utilization = Planned/Capacity.
+    """
+
+    if window_start is None or window_end is None:
+        ws, we = week_window(today)
+        window_start = window_start or ws
+        window_end = window_end or we
+
+    if window_end < window_start:
+        window_start, window_end = window_end, window_start
+
+    # Map owner_id -> display
+    emp_map: Dict[str, str] = {}
+    for e in employees or []:
+        if not isinstance(e, dict):
+            continue
+        eid = str(e.get("id", "") or "").strip()
+        dn = str(e.get("display_name", "") or "").strip()
+        if eid and dn:
+            emp_map[eid] = dn
+
+    cap = float(business_days_between(window_start, window_end) or 0)
+    cap = cap if cap > 0 else 1.0
+
+    agg: Dict[str, Dict[str, Any]] = {}
+
+    def _bucket(owner_id: str, owner_name: str) -> Dict[str, Any]:
+        if owner_id not in agg:
+            agg[owner_id] = {
+                "owner_id": owner_id,
+                "owner": owner_name,
+                "planned": 0.0,
+                "done": 0.0,
+                "remaining": 0.0,
+                "capacity": cap,
+                "util": 0.0,
+                "tasks": 0,
+                "overdue": 0,
+            }
+        return agg[owner_id]
+
+    for s in series_list or []:
+        # Capacity is about tasks only; appointments/meta/cancelled don't contribute.
+        if not is_task(s):
+            continue
+        if getattr(s, "state", "") in ("CANCELLED",):
+            continue
+
+        st = getattr(s, "start", None)
+        en = getattr(s, "end", None)
+        if not isinstance(st, date) or not isinstance(en, date):
+            continue
+
+        ov_st, ov_en, ok = _overlap_days(st, en, window_start, window_end)
+        if not ok:
+            continue
+
+        owner_id = str(getattr(s, "owner_id", "") or "").strip()
+        owner_name = str(getattr(s, "owner", "") or "").strip()
+        if not owner_name and owner_id:
+            owner_name = emp_map.get(owner_id, "")
+        if not owner_id and owner_name:
+            # keep stable bucket for names if IDs missing
+            owner_id = f"name:{owner_name.lower()}"
+
+        if not owner_id:
+            owner_id = "(unassigned)"
+            owner_name = "Unassigned"
+
+        b = _bucket(owner_id, owner_name or emp_map.get(owner_id, owner_id))
+        b["tasks"] += 1
+        if is_overdue(s, today):
+            b["overdue"] += 1
+
+        planned_bd = float(business_days_between(ov_st, ov_en))
+
+        done_bd = 0.0
+        for d in (getattr(s, "done_days", set()) or set()):
+            if not isinstance(d, date):
+                continue
+            if window_start <= d <= window_end and d.weekday() < 5:
+                done_bd += 1.0
+
+        # clamp
+        done_bd = min(done_bd, planned_bd)
+        rem_bd = max(planned_bd - done_bd, 0.0)
+
+        b["planned"] += planned_bd
+        b["done"] += done_bd
+        b["remaining"] += rem_bd
+
+    out: List[Dict[str, Any]] = list(agg.values())
+    for r in out:
+        r["util"] = (float(r.get("planned", 0.0)) / float(r.get("capacity", cap) or cap)) if cap else 0.0
+
+    # stable ordering: high util first, then name
+    out.sort(key=lambda x: (-float(x.get("util", 0.0)), str(x.get("owner", ""))))
+    return out

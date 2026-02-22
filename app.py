@@ -37,6 +37,8 @@ from core import (
     total_days,
     unmark_done,
     would_create_cycle,
+    capacity_summary,
+    week_window,
 )
 
 try:
@@ -1112,6 +1114,9 @@ ctx = {
     "plot_burndown_matplotlib": plot_burndown_matplotlib,
     "plot_velocity_plotly": plot_velocity_plotly,
     "rolling_sum": rolling_sum,
+    # capacity
+    "capacity_summary": capacity_summary,
+    "week_window": week_window,
 }
 
 page = st.session_state.page
