@@ -66,8 +66,7 @@ def render(ctx: dict) -> None:
     visible_series = ctx["visible_series"]
 
     is_task = ctx["is_task"]
-    is_completed = ctx["is_completed"]
-
+    is_completed = ctx["is_completed"]  # kept (may be used elsewhere / future)
     persist = ctx["persist"]
     sync_lists_from_data = ctx["sync_lists_from_data"]
 
@@ -101,10 +100,7 @@ def render(ctx: dict) -> None:
             f_meta = True
 
     # apply filters
-    filtered = [
-        s for s in series
-        if _in_filters(s, f_portfolio, f_project, f_owner, f_theme, f_meta)
-    ]
+    filtered = [s for s in series if _in_filters(s, f_portfolio, f_project, f_owner, f_theme, f_meta)]
 
     # group by state (fallback if missing)
     buckets = {stt: [] for stt in KANBAN_STATES}
@@ -151,14 +147,17 @@ def render(ctx: dict) -> None:
                     sync_lists_from_data()
 
                 state_key = f"kb_state_{sid}"
-                # initialize selectbox state
-                if state_key not in st.session_state:
-                    st.session_state[state_key] = stt
+
+                # ✅ FIX: Initialize ONLY via session_state (no index/value on widget)
+                current_state = _norm(getattr(s, "state", "") or "").upper() or stt
+                if current_state not in KANBAN_STATES:
+                    current_state = "PLANNED"
+                if (state_key not in st.session_state) or (st.session_state.get(state_key) not in KANBAN_STATES):
+                    st.session_state[state_key] = current_state
 
                 c_state.selectbox(
                     label="",
                     options=KANBAN_STATES,
-                    index=KANBAN_STATES.index(st.session_state[state_key]) if st.session_state[state_key] in KANBAN_STATES else 0,
                     key=state_key,
                     label_visibility="collapsed",
                     on_change=_set_state,
@@ -193,5 +192,4 @@ def render(ctx: dict) -> None:
                             request_done_single(sid, today, reason="Kanban quick DONE")
                             st.rerun()
 
-                # small spacer
                 st.markdown("---")
