@@ -17,11 +17,6 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-import os, sys
-HERE = os.path.dirname(os.path.abspath(__file__))
-if HERE not in sys.path:
-    sys.path.insert(0, HERE)
-    
 from core import (
     TaskPart,
     TaskSeries,
@@ -44,6 +39,9 @@ from core import (
     would_create_cycle,
     capacity_summary,
     week_window,
+    compute_units_composition,
+    forecast_eta_units,
+    series_total_units,
 )
 
 try:
@@ -1116,6 +1114,10 @@ ctx = {
     # reporting
     "compute_done_composition": compute_done_composition,
     "forecast_eta": forecast_eta,
+    # units-based reporting (self-explaining)
+    "compute_units_composition": compute_units_composition,
+    "forecast_eta_units": forecast_eta_units,
+    "series_total_units": series_total_units,
     "plot_burndown_matplotlib": plot_burndown_matplotlib,
     "plot_velocity_plotly": plot_velocity_plotly,
     "rolling_sum": rolling_sum,
