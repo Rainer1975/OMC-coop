@@ -79,16 +79,6 @@ def render(ctx) -> None:
 
     st.markdown("---")
 
-    # Quick drill buttons
-    b1, b2, b3 = st.columns(3)
-    b4, b5, b6 = st.columns(3)
-    b1.button("Drill: Due today", key="home_drill_today", on_click=lambda: st.session_state.update({"home_drill": "today"}))
-    b2.button("Drill: Overdue", key="home_drill_overdue", on_click=lambda: st.session_state.update({"home_drill": "overdue"}))
-    b3.button("Drill: Active", key="home_drill_active", on_click=lambda: st.session_state.update({"home_drill": "active"}))
-    b4.button("Drill: META open", key="home_drill_meta", on_click=lambda: st.session_state.update({"home_drill": "meta"}))
-    b5.button("Drill: APPT today", key="home_drill_appt", on_click=lambda: st.session_state.update({"home_drill": "appt"}))
-    b6.button("Drill: All", key="home_drill_all", on_click=lambda: st.session_state.update({"home_drill": "all"}))
-
     st.markdown("#### Drilldown")
     drill = st.session_state.get("home_drill", "today")
     drill = st.radio(
