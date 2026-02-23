@@ -136,35 +136,37 @@ class TaskSeries:
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "TaskSeries":
-        # Hard guard: must be dict
-        if not isinstance(d, dict):
-            raise TypeError("TaskSeries.from_dict expects dict")
-
         st = _parse_date(d.get("start")) or date.today()
         en = _parse_date(d.get("end")) or st
 
-        parts_raw = d.get("parts") or []
-        parts: List[TaskPart] = []
-        if isinstance(parts_raw, list):
-            for pr in parts_raw:
-                if isinstance(pr, dict):
-                    try:
-                        parts.append(TaskPart.from_dict(pr))
-                    except Exception:
-                        continue
+        parts = d.get("parts") or []
+        if not isinstance(parts, list):
+            parts = []
+        parts_obj: List[TaskPart] = []
+        for x in parts:
+            try:
+                if isinstance(x, dict):
+                    parts_obj.append(TaskPart.from_dict(x))
+            except Exception:
+                continue
 
-        dd_raw = d.get("done_days") or []
-        done_days: Set[date] = set()
-        if isinstance(dd_raw, list):
-            for x in dd_raw:
-                dx = _parse_date(x)
-                if dx:
-                    done_days.add(dx)
-
-        preds = d.get("predecessors") or d.get("depends_on") or []
+        preds = d.get("predecessors") or []
         if not isinstance(preds, list):
             preds = []
         preds = [str(x).strip() for x in preds if str(x).strip()]
+
+        dd = d.get("done_days") or []
+        if not isinstance(dd, list):
+            dd = []
+        done_set: Set[date] = set()
+        for x in dd:
+            pd = _parse_date(x)
+            if pd:
+                done_set.add(pd)
+
+        meta = d.get("meta") or {}
+        if not isinstance(meta, dict):
+            meta = {}
 
         return TaskSeries(
             series_id=str(d.get("series_id") or ""),
@@ -172,7 +174,7 @@ class TaskSeries:
             start=st,
             end=en,
             kind=str(d.get("kind") or "task"),
-            is_meta=bool(d.get("is_meta", False)),
+            is_meta=bool(d.get("is_meta") or False),
             portfolio=str(d.get("portfolio") or "Default"),
             project=str(d.get("project") or ""),
             theme=str(d.get("theme") or "General"),
@@ -182,52 +184,52 @@ class TaskSeries:
             time_start=str(d.get("time_start") or ""),
             time_end=str(d.get("time_end") or ""),
             location=str(d.get("location") or ""),
-            parts=parts,
+            parts=parts_obj,
             predecessors=preds,
-            done_days=done_days,
-            meta=dict(d.get("meta") or {}),
+            done_days=done_set,
+            meta=meta,
         )
+
+
+# =========================
+# IDs
+# =========================
+def _make_id(prefix: str) -> str:
+    ts = datetime.now().strftime("%Y%m%d%H%M%S%f")
+    return f"{prefix}_{ts}"
 
 
 # =========================
 # Constructors
 # =========================
-def new_part(
-    part_id: str,
-    label: str,
-    start: date,
-    end: date,
-    weight: float = 100.0,
-    predecessors: Optional[List[str]] = None,
-) -> TaskPart:
+def new_part(label: str, start: date, end: date, weight: float = 100.0, predecessors: Optional[List[str]] = None) -> TaskPart:
     return TaskPart(
-        part_id=str(part_id),
-        label=str(label),
+        part_id=_make_id("p"),
+        label=str(label or ""),
         start=start,
         end=end,
-        weight=float(weight),
+        weight=float(weight or 0.0),
         predecessors=list(predecessors or []),
+        meta={},
     )
 
 
 def new_series(
+    *,
     title: str,
+    portfolio: str,
     project: str,
     theme: str,
     owner: str,
     owner_id: str,
     start: date,
     end: date,
-    is_meta: bool = False,
+    is_meta: bool,
     kind: str = "task",
-    portfolio: str = "Default",
     state: str = "ACTIVE",
 ) -> TaskSeries:
-    ts = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
-    pid = os.getpid()
-    sid = f"s_{ts}_{pid}_{abs(hash((title, project, owner, start.isoformat(), end.isoformat())))%10**8}"
     return TaskSeries(
-        series_id=sid,
+        series_id=_make_id("s"),
         title=str(title or ""),
         start=start,
         end=end,
@@ -239,352 +241,237 @@ def new_series(
         owner=str(owner or ""),
         owner_id=str(owner_id or ""),
         state=str(state or "ACTIVE"),
+        parts=[],
+        predecessors=[],
+        done_days=set(),
+        meta={},
     )
 
 
 # =========================
-# Classification helpers
+# Predicates / status
 # =========================
 def is_task(s: TaskSeries) -> bool:
-    return (getattr(s, "kind", "") or "task").lower() != "appointment"
+    return str(getattr(s, "kind", "task") or "task").lower() == "task"
 
 
 def is_appointment(s: TaskSeries) -> bool:
-    return (getattr(s, "kind", "") or "").lower() == "appointment"
+    return str(getattr(s, "kind", "") or "").lower() == "appointment"
 
-
-def total_days(s: TaskSeries) -> int:
-    if not getattr(s, "start", None) or not getattr(s, "end", None):
-        return 0
-    return max(0, (s.end - s.start).days + 1)
-
-
-
-def remaining_days(s: TaskSeries, today: date) -> int:
-    """Remaining planned days from *today* to end (inclusive), excluding done days."""
-    if not isinstance(today, date):
-        return 0
-    if not getattr(s, "start", None) or not getattr(s, "end", None):
-        return 0
-    if today > s.end:
-        return 0
-
-    start = s.start if today <= s.start else today
-    if start > s.end:
-        return 0
-
-    done = getattr(s, "done_days", set()) or set()
-    rem = 0
-    d = start
-    while d <= s.end:
-        if d not in done:
-            rem += 1
-        d += timedelta(days=1)
-    return rem
 
 def is_completed(s: TaskSeries, today: date) -> bool:
-    if getattr(s, "state", "") == "DONE":
-        return True
-    if not is_task(s):
-        return False
-    t = total_days(s)
-    if t <= 0:
-        return s.start in (s.done_days or set())
-    needed = {s.start + timedelta(days=i) for i in range(t)}
-    return needed.issubset(set(s.done_days or set()))
+    # completed if today is marked done OR if series.state is DONE (for tasks) and end <= today
+    try:
+        if today in (getattr(s, "done_days", set()) or set()):
+            return True
+    except Exception:
+        pass
+    try:
+        stt = str(getattr(s, "state", "") or "").upper()
+        if stt == "DONE" and getattr(s, "end", today) <= today:
+            return True
+    except Exception:
+        pass
+    return False
 
 
-def is_active(s: TaskSeries, today: date) -> bool:
-    if is_appointment(s):
-        return s.start <= today <= s.end
-    if getattr(s, "state", "") == "CANCELLED":
-        return False
-    return s.start <= today <= s.end and not is_completed(s, today)
+def is_active(s: TaskSeries) -> bool:
+    stt = str(getattr(s, "state", "") or "").upper()
+    return stt == "ACTIVE"
 
 
 def is_overdue(s: TaskSeries, today: date) -> bool:
-    if not is_task(s):
+    try:
+        return is_task(s) and getattr(s, "end", today) < today and not is_completed(s, today)
+    except Exception:
         return False
-    if getattr(s, "state", "") == "CANCELLED":
-        return False
-    if is_completed(s, today):
-        return False
-    return s.end < today
-
-
-def progress_percent(s: TaskSeries) -> float:
-    if not is_task(s):
-        return 0.0
-    t = total_days(s)
-    if t <= 0:
-        return 100.0 if s.start in (s.done_days or set()) else 0.0
-    done = sum(1 for d in (s.done_days or set()) if s.start <= d <= s.end)
-    return max(0.0, min(100.0, 100.0 * (done / float(t))))
 
 
 # =========================
 # Done operations
 # =========================
-def mark_done(s: TaskSeries, d: date, actor: Optional[str] = None) -> None:
-    if not is_task(s):
+def mark_done(s: TaskSeries, d: date) -> None:
+    if d is None:
         return
-    if d < s.start or d > s.end:
-        return
-    if s.done_days is None:
-        s.done_days = set()
+    if d < getattr(s, "start", d) or d > getattr(s, "end", d):
+        # allow anyway (but usually shouldn't happen)
+        pass
+    if not isinstance(getattr(s, "done_days", None), set):
+        try:
+            s.done_days = set()
+        except Exception:
+            return
     s.done_days.add(d)
 
 
-def unmark_done(s: TaskSeries, d: date, actor: Optional[str] = None) -> None:
-    if not is_task(s):
-        return
-    if not s.done_days:
-        return
-    s.done_days.discard(d)
-    if getattr(s, "state", "") == "DONE":
-        s.state = "ACTIVE"
+def unmark_done(s: TaskSeries, d: date) -> None:
+    try:
+        if isinstance(getattr(s, "done_days", None), set) and d in s.done_days:
+            s.done_days.remove(d)
+    except Exception:
+        pass
 
 
-def bulk_set_done(s: TaskSeries, days: List[date], set_done: bool = True, actor: Optional[str] = None) -> int:
-    if not is_task(s):
+def bulk_set_done(series_list: List[TaskSeries], items: List[Dict[str, str]]) -> None:
+    """
+    items: [{"series_id": "...", "day_iso": "YYYY-MM-DD"}, ...]
+    """
+    idx = {s.series_id: s for s in series_list}
+    for it in items:
+        sid = str(it.get("series_id") or "")
+        dd = _parse_date(it.get("day_iso"))
+        if not sid or not dd:
+            continue
+        s = idx.get(sid)
+        if not s:
+            continue
+        mark_done(s, dd)
+
+
+# =========================
+# Date helpers
+# =========================
+def total_days(s: TaskSeries) -> int:
+    try:
+        st = getattr(s, "start", None)
+        en = getattr(s, "end", None)
+        if not isinstance(st, date) or not isinstance(en, date):
+            return 0
+        return max(1, (en - st).days + 1)
+    except Exception:
         return 0
-    if s.done_days is None:
-        s.done_days = set()
-    changed = 0
-    for d in days or []:
-        if d < s.start or d > s.end:
-            continue
-        if set_done:
-            if d not in s.done_days:
-                s.done_days.add(d)
-                changed += 1
-        else:
-            if d in s.done_days:
-                s.done_days.remove(d)
-                changed += 1
-    if set_done and is_completed(s, date.today()):
-        s.state = "DONE"
-    if (not set_done) and getattr(s, "state", "") == "DONE":
-        s.state = "ACTIVE"
-    return changed
+
+
+def progress_percent(s: TaskSeries, today: date) -> float:
+    """
+    Progress = done days / total days, capped to [0..1]
+    """
+    try:
+        td = total_days(s)
+        if td <= 0:
+            return 0.0
+        dd = getattr(s, "done_days", set()) or set()
+        if not isinstance(dd, set):
+            dd = set()
+        done_in_range = [d for d in dd if getattr(s, "start") <= d <= getattr(s, "end") and d <= today]
+        return max(0.0, min(1.0, float(len(done_in_range)) / float(td)))
+    except Exception:
+        return 0.0
 
 
 # =========================
-# Dependencies (robust)
+# Dependencies (series-level)
 # =========================
-SeriesOrId = Union[str, TaskSeries, None]
-
-
-def _sid(x: SeriesOrId) -> str:
-    if x is None:
-        return ""
-    if isinstance(x, str):
-        return x.strip()
-    return str(getattr(x, "series_id", "") or "").strip()
-
-
-def can_depend_series(a: SeriesOrId, b: SeriesOrId) -> bool:
-    sa = _sid(a)
-    sb = _sid(b)
-    if not sa or not sb:
+def would_create_cycle(series_list: List[TaskSeries], src_series_id: str, dst_series_id: str) -> bool:
+    """
+    If we add an edge src <- dst (dst depends on src), would that create a cycle?
+    """
+    if not src_series_id or not dst_series_id:
         return False
-    return sa != sb
-
-
-def _pred_map(series_list: List[TaskSeries]) -> Dict[str, List[str]]:
-    m: Dict[str, List[str]] = {}
-    for s in series_list or []:
-        sid = (s.series_id or "").strip()
-        if not sid:
-            continue
-        preds = getattr(s, "predecessors", []) or []
-        if not isinstance(preds, list):
-            preds = []
-        m[sid] = [str(x).strip() for x in preds if str(x).strip()]
-    return m
-
-
-def would_create_cycle(pred_id: str, succ_id: str, series_list: List[TaskSeries]) -> bool:
-    pred_id = (pred_id or "").strip()
-    succ_id = (succ_id or "").strip()
-    if not pred_id or not succ_id or pred_id == succ_id:
+    if src_series_id == dst_series_id:
         return True
 
-    preds = _pred_map(series_list)
+    succ: Dict[str, List[str]] = {}
+    for s in series_list:
+        sid = s.series_id
+        preds = list(getattr(s, "predecessors", []) or [])
+        for p in preds:
+            succ.setdefault(p, []).append(sid)
 
-    succ_preds = set(preds.get(succ_id, []))
-    succ_preds.add(pred_id)
-    preds[succ_id] = list(succ_preds)
+    # add proposed edge
+    succ.setdefault(src_series_id, []).append(dst_series_id)
 
-    stack = [succ_id]
+    # detect cycle: dst reaches src
     seen = set()
-    while stack:
-        cur = stack.pop()
-        if cur in seen:
+    q = [dst_series_id]
+    while q:
+        x = q.pop(0)
+        if x == src_series_id:
+            return True
+        if x in seen:
             continue
-        seen.add(cur)
-        for p in preds.get(cur, []):
-            if p == succ_id:
-                return True
-            stack.append(p)
+        seen.add(x)
+        for y in succ.get(x, []):
+            q.append(y)
     return False
 
 
+def can_depend_series(series_list: List[TaskSeries], src_series_id: str, dst_series_id: str) -> bool:
+    # dst depends on src
+    if not src_series_id or not dst_series_id:
+        return False
+    if src_series_id == dst_series_id:
+        return False
+    return not would_create_cycle(series_list, src_series_id, dst_series_id)
+
+
 # =========================
-# Gantt items
+# Gantt
 # =========================
-def gantt_items(series_list: List[TaskSeries], today: Optional[date] = None) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    for s in series_list or []:
-        sid = (s.series_id or "").strip()
-        if not sid:
+def gantt_items(series_list: List[TaskSeries], today: date) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    for s in series_list:
+        try:
+            items.append(
+                {
+                    "series_id": s.series_id,
+                    "title": s.title,
+                    "start": s.start,
+                    "end": s.end,
+                    "owner": s.owner,
+                    "owner_id": s.owner_id,
+                    "portfolio": s.portfolio,
+                    "project": s.project,
+                    "theme": s.theme,
+                    "kind": s.kind,
+                    "is_meta": bool(s.is_meta),
+                    "state": s.state,
+                    "progress": progress_percent(s, today),
+                    "predecessors": list(getattr(s, "predecessors", []) or []),
+                }
+            )
+        except Exception:
             continue
-        out.append(
-            {
-                "id": sid,
-                "title": s.title,
-                "start": s.start,
-                "end": s.end,
-                "portfolio": getattr(s, "portfolio", ""),
-                "project": getattr(s, "project", ""),
-                "theme": getattr(s, "theme", ""),
-                "owner": getattr(s, "owner", ""),
-                "owner_id": getattr(s, "owner_id", ""),
-                "is_meta": bool(getattr(s, "is_meta", False)),
-                "kind": getattr(s, "kind", "task"),
-                "state": getattr(s, "state", ""),
-                "predecessors": list(getattr(s, "predecessors", []) or []),
-                "progress": progress_percent(s),
-                "done_days": set(getattr(s, "done_days", set()) or set()),
-            }
-        )
-    return out
-
-
-# =========================
-# Critical path
-# =========================
-def critical_path_series(series_list: List[TaskSeries]) -> List[str]:
-    preds = _pred_map(series_list)
-    dur: Dict[str, int] = {}
-    for s in series_list or []:
-        sid = (s.series_id or "").strip()
-        if not sid:
-            continue
-        dur[sid] = max(1, total_days(s))
-
-    if not dur:
-        return []
-
-    best_len: Dict[str, int] = {}
-    best_prev: Dict[str, Optional[str]] = {}
-    visiting: Set[str] = set()
-
-    def dp(node: str) -> int:
-        if node in best_len:
-            return best_len[node]
-        if node in visiting:
-            best_len[node] = dur.get(node, 1)
-            best_prev[node] = None
-            return best_len[node]
-        visiting.add(node)
-
-        pbest = 0
-        pbest_id: Optional[str] = None
-        for p in preds.get(node, []):
-            if not p:
-                continue
-            v = dp(p)
-            if v > pbest:
-                pbest = v
-                pbest_id = p
-
-        visiting.remove(node)
-        best_len[node] = dur.get(node, 1) + pbest
-        best_prev[node] = pbest_id
-        return best_len[node]
-
-    end_node = max(dur.keys(), key=lambda n: dp(n))
-    path: List[str] = []
-    cur: Optional[str] = end_node
-    while cur:
-        path.append(cur)
-        cur = best_prev.get(cur)
-    path.reverse()
-    return path
+    return items
 
 
 # =========================
 # Persistence
 # =========================
-def _atomic_write(path: str, text: str) -> None:
+def save_state(path: Union[str, Path], series_list: List[TaskSeries]) -> None:
     p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix="omg_", suffix=".tmp", dir=str(p.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-        os.replace(tmp, path)
-    finally:
-        try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-        except Exception:
-            pass
+    data = [s.to_dict() for s in (series_list or [])]
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def save_state(path: str, series_list: List[TaskSeries]) -> None:
-    payload: List[Dict[str, Any]] = []
-    for s in series_list or []:
-        if isinstance(s, TaskSeries):
-            payload.append(s.to_dict())
-    _atomic_write(path, json.dumps(payload, ensure_ascii=False, indent=2))
-
-
-def load_state(path: str) -> List[TaskSeries]:
+def load_state(path: Union[str, Path]) -> List[TaskSeries]:
     p = Path(path)
     if not p.exists():
         return []
-
     try:
-        raw = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            return []
+        out: List[TaskSeries] = []
+        for x in data:
+            if isinstance(x, dict):
+                try:
+                    out.append(TaskSeries.from_dict(x))
+                except Exception:
+                    continue
+        return out
     except Exception:
         return []
 
-    if isinstance(raw, list):
-        data = raw
-    elif isinstance(raw, dict):
-        data = raw.get("series") or raw.get("data") or raw.get("items") or []
-        if not isinstance(data, list):
-            data = []
-    else:
-        data = []
-
-    out: List[TaskSeries] = []
-    for d in data:
-        if not isinstance(d, dict):
-            continue
-        try:
-            s = TaskSeries.from_dict(d)
-            if not (s.series_id or "").strip():
-                continue
-            out.append(s)
-        except Exception:
-            continue
-    return out
-
 
 # =========================
-# Capacity / Workload
+# Capacity (simple)
 # =========================
-def business_days_between(start: date, end: date) -> int:
-    """Count Mon–Fri days in [start,end]."""
-    if not isinstance(start, date) or not isinstance(end, date):
+def _business_days_between(start: date, end: date) -> int:
+    if start > end:
         return 0
-    if end < start:
-        return 0
-    n = 0
     d = start
+    n = 0
     while d <= end:
         if d.weekday() < 5:
             n += 1
@@ -592,156 +479,168 @@ def business_days_between(start: date, end: date) -> int:
     return n
 
 
-def week_window(today: date) -> tuple[date, date]:
-    """Return Monday..Sunday window for given day."""
-    if not isinstance(today, date):
-        today = date.today()
+def _week_window(today: date) -> tuple[date, date]:
+    # Monday..Sunday window
     start = today - timedelta(days=today.weekday())
     end = start + timedelta(days=6)
     return start, end
 
 
-def _overlap_days(start_a: date, end_a: date, start_b: date, end_b: date) -> tuple[date, date, bool]:
-    """Return (start,end,has_overlap) for overlap of [a] and [b]."""
-    st = max(start_a, start_b)
-    en = min(end_a, end_b)
-    return st, en, (st <= en)
+def _month_window(today: date) -> tuple[date, date]:
+    start = today.replace(day=1)
+    # next month start
+    if start.month == 12:
+        nstart = start.replace(year=start.year + 1, month=1, day=1)
+    else:
+        nstart = start.replace(month=start.month + 1, day=1)
+    end = nstart - timedelta(days=1)
+    return start, end
 
 
 def capacity_summary(
     series_list: List[TaskSeries],
     employees: List[Dict[str, Any]],
     today: date,
-    window_start: Optional[date] = None,
-    window_end: Optional[date] = None,
-) -> List[Dict[str, Any]]:
-    """Compute Planned/Done/Remaining per owner for a date window.
-
-    Planned/Done/Remaining are counted in *business-day units*.
-    - Planned: business days in overlap of task and window
-    - Done: done_days inside window (business days)
-    - Remaining: max(Planned - Done, 0)
-
-    Capacity is business days in window (Mon–Fri). Utilization = Planned/Capacity.
+    window: str = "week",
+    default_capacity_per_day: float = 5.0,
+) -> Dict[str, Any]:
     """
+    Very pragmatic:
+      - capacity = business_days * capacity_per_day (per employee)
+      - planned = sum units for tasks overlapping window, excluding completed
+      - done = sum units done within window (based on done_days)
+      - remaining = planned - done (>=0)
+      - overdue = count overdue tasks
+    """
+    w = (window or "week").lower().strip()
+    if w == "month":
+        win_start, win_end = _month_window(today)
+    else:
+        win_start, win_end = _week_window(today)
 
-    if window_start is None or window_end is None:
-        ws, we = week_window(today)
-        window_start = window_start or ws
-        window_end = window_end or we
-
-    if window_end < window_start:
-        window_start, window_end = window_end, window_start
-
-    # Map owner_id -> display
-    emp_map: Dict[str, str] = {}
+    # index employees
+    emp_by_id = {}
     for e in employees or []:
-        if not isinstance(e, dict):
+        eid = str(e.get("id") or "").strip()
+        if not eid:
             continue
-        eid = str(e.get("id", "") or "").strip()
-        dn = str(e.get("display_name", "") or "").strip()
-        if eid and dn:
-            emp_map[eid] = dn
+        emp_by_id[eid] = {
+            "id": eid,
+            "display_name": str(e.get("display_name") or "").strip(),
+        }
 
-    cap = float(business_days_between(window_start, window_end) or 0)
-    cap = cap if cap > 0 else 1.0
+    # allocate task "units"
+    def units_for_task(s: TaskSeries) -> float:
+        # weight is optional. If missing or <=0 => 1
+        try:
+            wv = float(getattr(s, "weight", 0.0) or 0.0)
+            if wv > 0:
+                return wv
+        except Exception:
+            pass
+        return 1.0
 
-    agg: Dict[str, Dict[str, Any]] = {}
-
-    def _bucket(owner_id: str, owner_name: str) -> Dict[str, Any]:
-        if owner_id not in agg:
-            agg[owner_id] = {
-                "owner_id": owner_id,
-                "owner": owner_name,
-                "planned": 0.0,
-                "done": 0.0,
-                "remaining": 0.0,
-                "capacity": cap,
-                "util": 0.0,
-                "tasks": 0,
-                "overdue": 0,
-            }
-        return agg[owner_id]
+    # per person buckets
+    by_emp: Dict[str, Dict[str, Any]] = {}
+    for eid, e in emp_by_id.items():
+        cap_days = _business_days_between(win_start, win_end)
+        cap = float(cap_days) * float(default_capacity_per_day)
+        by_emp[eid] = {
+            "id": eid,
+            "name": e.get("display_name") or eid,
+            "window_start": win_start,
+            "window_end": win_end,
+            "capacity": cap,
+            "planned": 0.0,
+            "done": 0.0,
+            "remaining": 0.0,
+            "overdue": 0,
+            "utilization": 0.0,
+            "status": "green",
+            "tasks": [],
+        }
 
     for s in series_list or []:
-        # Capacity is about tasks only; appointments/meta/cancelled don't contribute.
-        if not is_task(s):
-            continue
-        if getattr(s, "state", "") in ("CANCELLED",):
-            continue
-
-        st = getattr(s, "start", None)
-        en = getattr(s, "end", None)
-        if not isinstance(st, date) or not isinstance(en, date):
-            continue
-
-        ov_st, ov_en, ok = _overlap_days(st, en, window_start, window_end)
-        if not ok:
-            continue
-
-        owner_id = str(getattr(s, "owner_id", "") or "").strip()
-        owner_name = str(getattr(s, "owner", "") or "").strip()
-        if not owner_name and owner_id:
-            owner_name = emp_map.get(owner_id, "")
-        if not owner_id and owner_name:
-            # keep stable bucket for names if IDs missing
-            owner_id = f"name:{owner_name.lower()}"
-
-        if not owner_id:
-            owner_id = "(unassigned)"
-            owner_name = "Unassigned"
-
-        b = _bucket(owner_id, owner_name or emp_map.get(owner_id, owner_id))
-        b["tasks"] += 1
-        if is_overdue(s, today):
-            b["overdue"] += 1
-
-        planned_bd = float(business_days_between(ov_st, ov_en))
-
-        done_bd = 0.0
-        for d in (getattr(s, "done_days", set()) or set()):
-            if not isinstance(d, date):
+        try:
+            if not is_task(s):
                 continue
-            if window_start <= d <= window_end and d.weekday() < 5:
-                done_bd += 1.0
+            eid = str(getattr(s, "owner_id", "") or "").strip()
+            if not eid or eid not in by_emp:
+                continue
+            # overlap window
+            if getattr(s, "end") < win_start or getattr(s, "start") > win_end:
+                continue
+            # skip fully completed
+            if is_completed(s, today):
+                pass  # still can count done days in window; keep going
 
-        # clamp
-        done_bd = min(done_bd, planned_bd)
-        rem_bd = max(planned_bd - done_bd, 0.0)
+            u = units_for_task(s)
 
-        b["planned"] += planned_bd
-        b["done"] += done_bd
-        b["remaining"] += rem_bd
+            # planned counts only if not completed
+            if not is_completed(s, today):
+                by_emp[eid]["planned"] += u
 
-    out: List[Dict[str, Any]] = list(agg.values())
-    for r in out:
-        r["util"] = (float(r.get("planned", 0.0)) / float(r.get("capacity", cap) or cap)) if cap else 0.0
+            # done units within window: if any done_day in window, count proportional by done days
+            dd = getattr(s, "done_days", set()) or set()
+            if isinstance(dd, set) and dd:
+                # count business done-days within window and within series range
+                done_in_win = 0
+                for d in dd:
+                    if not isinstance(d, date):
+                        continue
+                    if d < win_start or d > win_end:
+                        continue
+                    if d < getattr(s, "start") or d > getattr(s, "end"):
+                        continue
+                    if d.weekday() < 5:
+                        done_in_win += 1
+                if done_in_win > 0:
+                    # spread units evenly across business days of series
+                    biz_days_series = _business_days_between(getattr(s, "start"), getattr(s, "end"))
+                    if biz_days_series <= 0:
+                        biz_days_series = 1
+                    by_emp[eid]["done"] += float(u) * (float(done_in_win) / float(biz_days_series))
 
-    # stable ordering: high util first, then name
-    out.sort(key=lambda x: (-float(x.get("util", 0.0)), str(x.get("owner", ""))))
-    return out
+            if is_overdue(s, today):
+                by_emp[eid]["overdue"] += 1
+
+            by_emp[eid]["tasks"].append(s)
+        except Exception:
+            continue
+
+    # finalize
+    for eid, row in by_emp.items():
+        planned = float(row["planned"])
+        done = float(row["done"])
+        remaining = max(0.0, planned - done)
+        row["remaining"] = remaining
+        cap = float(row["capacity"]) if float(row["capacity"]) > 0 else 1.0
+        util = planned / cap
+        row["utilization"] = util
+
+        # status thresholds
+        if util < 0.85:
+            row["status"] = "green"
+        elif util < 1.10:
+            row["status"] = "yellow"
+        else:
+            row["status"] = "red"
+
+    return {
+        "window": w,
+        "window_start": win_start,
+        "window_end": win_end,
+        "by_employee": by_emp,
+    }
 
 
 # =========================
-# Velocity / Burndown (units)
+# Velocity / Burndown helpers (units-based)
 # =========================
-def _safe_float(x: Any, default: float = 0.0) -> float:
-    try:
-        v = float(x)
-        if v != v:  # NaN
-            return default
-        return v
-    except Exception:
-        return default
-
-
-def business_day_range(start: date, end: date) -> List[date]:
-    """Return Mon–Fri days in [start,end]."""
-    if not isinstance(start, date) or not isinstance(end, date):
-        return []
-    if end < start:
-        return []
+def business_days_between_inclusive(start: date, end: date) -> List[date]:
     out: List[date] = []
+    if start > end:
+        return out
     d = start
     while d <= end:
         if d.weekday() < 5:
@@ -750,145 +649,130 @@ def business_day_range(start: date, end: date) -> List[date]:
     return out
 
 
-def add_business_days(start: date, n: int) -> date:
-    """Add n business days (Mon–Fri) to start. n can be 0."""
-    if not isinstance(start, date):
-        start = date.today()
-    n = int(n)
-    if n <= 0:
-        return start
-    d = start
-    left = n
+def add_business_days(d: date, n: int) -> date:
+    step = 1 if n >= 0 else -1
+    left = abs(int(n))
+    cur = d
     while left > 0:
-        d += timedelta(days=1)
-        if d.weekday() < 5:
+        cur = cur + timedelta(days=step)
+        if cur.weekday() < 5:
             left -= 1
-    return d
+    return cur
 
 
-def series_total_units(s: TaskSeries) -> float:
-    """Total units for a series.
-
-    Rule (per your decision):
-    - If explicit weight exists, use it.
-    - Else fallback to 1.
+def series_units(s: TaskSeries) -> float:
     """
-    # 1) explicit weight in meta
-    meta = getattr(s, "meta", {}) or {}
-    w = _safe_float(meta.get("weight", None), default=0.0)
-    if w > 0:
-        return w
-
-    # 2) parts weight (if parts are used)
-    parts = getattr(s, "parts", []) or []
-    if parts:
-        sw = 0.0
-        for p in parts:
-            sw += _safe_float(getattr(p, "weight", 0.0), default=0.0)
-        if sw > 0:
-            return sw
-
-    # 3) fallback
+    Units rule:
+      - if s.weight exists and > 0 => use it
+      - else 1.0
+    """
+    try:
+        wv = float(getattr(s, "weight", 0.0) or 0.0)
+        if wv > 0:
+            return float(wv)
+    except Exception:
+        pass
     return 1.0
 
 
-def series_units_per_business_day(s: TaskSeries) -> float:
-    """Distribute total units across business days in the series duration."""
-    st = getattr(s, "start", None)
-    en = getattr(s, "end", None)
-    if not isinstance(st, date) or not isinstance(en, date):
-        return 0.0
-    bdays = business_days_between(st, en)
-    if bdays <= 0:
-        return 0.0
-    return float(series_total_units(s)) / float(bdays)
-
-
 def compute_units_composition(task_series: List[TaskSeries]):
-    """Compute done units/day + remaining units/day over business days.
-
-    Done units/day are derived from done_days:
-    each DONE day contributes (total_units / business_days_in_task).
-
-    Returns:
-      all_days (business days), done_units_day, remaining_units_day, comp_by_day
     """
-    tasks = [s for s in (task_series or []) if is_task(s)]
+    Build units composition per business day for given tasks.
+    Returns:
+      - all_days: business days covering min(start)..max(end)
+      - done_units_day: units done per day (sum across tasks)
+      - remaining_units_day: remaining units after that day
+      - comp_by_day: for each day: list of dicts per task: {"series_id","title","units_done","units_remaining"}
+    Notes:
+      - units are distributed evenly across business days of each task
+      - a done_day contributes one unit-slice for that day if that day is marked done
+    """
+    tasks = [s for s in (task_series or []) if is_task(s) and not getattr(s, "is_meta", False)]
     if not tasks:
         return [], [], [], []
 
-    min_day = min(s.start for s in tasks)
-    max_day = max(s.end for s in tasks)
+    min_d = min(getattr(s, "start") for s in tasks)
+    max_d = max(getattr(s, "end") for s in tasks)
+    all_days = business_days_between_inclusive(min_d, max_d)
 
-    all_days = business_day_range(min_day, max_day)
-    if not all_days:
-        return [], [], [], []
+    day_index = {d: i for i, d in enumerate(all_days)}
+    done_units_day = [0.0 for _ in all_days]
+    total_units = 0.0
 
-    done_units_day: List[float] = []
-    remaining_units_day: List[float] = []
-    comp_by_day: List[List[Dict[str, Any]]] = []
+    # per day composition details
+    comp_by_day: List[List[Dict[str, Any]]] = [[] for _ in all_days]
 
-    # precompute per-series constants
-    per_day: Dict[str, float] = {}
-    total_units: Dict[str, float] = {}
+    # allocate per task
+    per_task_total = {}
+    per_task_daily = {}
+
     for s in tasks:
-        per_day[s.series_id] = series_units_per_business_day(s)
-        total_units[s.series_id] = float(series_total_units(s))
+        u = series_units(s)
+        total_units += u
+        biz_days = business_days_between_inclusive(getattr(s, "start"), getattr(s, "end"))
+        denom = max(1, len(biz_days))
+        per_day = float(u) / float(denom)
 
-    for day in all_days:
-        done_today = 0.0
-        comp: List[Dict[str, Any]] = []
-        rem_total = 0.0
+        per_task_total[s.series_id] = float(u)
+        per_task_daily[s.series_id] = per_day
 
-        for s in tasks:
-            st = s.start
-            en = s.end
-            if day < st:
-                rem_total += total_units[s.series_id]
+        # done contributions
+        dd = getattr(s, "done_days", set()) or set()
+        if not isinstance(dd, set):
+            dd = set()
+
+        for d in biz_days:
+            i = day_index.get(d)
+            if i is None:
                 continue
-            if day > en:
+            units_done = per_day if d in dd else 0.0
+            done_units_day[i] += units_done
+
+    # compute remaining series over time
+    remaining_units_day: List[float] = []
+    cum_done = 0.0
+    for i, d in enumerate(all_days):
+        cum_done += float(done_units_day[i])
+        remaining = max(0.0, float(total_units) - float(cum_done))
+        remaining_units_day.append(remaining)
+
+    # composition per day
+    for s in tasks:
+        u_total = float(per_task_total.get(s.series_id, 0.0))
+        per_day = float(per_task_daily.get(s.series_id, 0.0))
+        biz_days = business_days_between_inclusive(getattr(s, "start"), getattr(s, "end"))
+        dd = getattr(s, "done_days", set()) or set()
+        if not isinstance(dd, set):
+            dd = set()
+
+        # track remaining per task cumulatively
+        done_so_far = 0.0
+        for d in biz_days:
+            i = day_index.get(d)
+            if i is None:
                 continue
-
-            # done units up to day
-            dd = getattr(s, "done_days", set()) or set()
-            done_upto = 0.0
-            for x in dd:
-                if not isinstance(x, date):
-                    continue
-                if st <= x <= day and x.weekday() < 5:
-                    done_upto += per_day[s.series_id]
-
-            # clamp to total
-            done_upto = min(done_upto, total_units[s.series_id])
-            rem_total += max(0.0, total_units[s.series_id] - done_upto)
-
-            if day in dd and day.weekday() < 5:
-                done_today += per_day[s.series_id]
-                comp.append(
-                    {
-                        "series_id": s.series_id,
-                        "owner": getattr(s, "owner", ""),
-                        "project": getattr(s, "project", ""),
-                        "task": getattr(s, "title", ""),
-                        "units": per_day[s.series_id],
-                    }
-                )
-
-        done_units_day.append(float(done_today))
-        remaining_units_day.append(float(rem_total))
-        comp_by_day.append(comp)
+            units_done = per_day if d in dd else 0.0
+            done_so_far += units_done
+            units_remaining = max(0.0, u_total - done_so_far)
+            comp_by_day[i].append(
+                {
+                    "series_id": s.series_id,
+                    "title": s.title,
+                    "units_done": float(units_done),
+                    "units_remaining": float(units_remaining),
+                }
+            )
 
     return all_days, done_units_day, remaining_units_day, comp_by_day
 
 
-def avg_last_window_float(values: List[float], end_idx: int, window: int) -> float:
-    if not values:
+def avg_last_window_float(values: List[float], anchor_idx: int, window_business_days: int) -> float:
+    w = max(1, int(window_business_days))
+    start = max(0, int(anchor_idx) - w + 1)
+    win = [float(x) for x in values[start : anchor_idx + 1]]
+    if not win:
         return 0.0
-    end_idx = max(0, min(end_idx, len(values) - 1))
-    window = max(1, int(window))
-    start = max(0, end_idx - window + 1)
-    chunk = values[start : end_idx + 1]
-    return float(sum(chunk)) / float(len(chunk)) if chunk else 0.0
+    return float(sum(win)) / float(len(win))
 
 
 def forecast_eta_units(
@@ -898,11 +782,11 @@ def forecast_eta_units(
     today_: date,
     window_business_days: int = 10,
 ):
-    """Forecast finish date based on remaining units and average done units/day.
-
-    - Anchor = last business day <= today with any done, else today
-    - Velocity = avg done units/day over last N business days ending at anchor
-    - ETA = anchor + ceil(remaining/velocity) business days
+    """
+    Forecast based on done units velocity:
+    - Anchor = last day <= today with a done>0, else last <= today
+    - Velocity = average done_units_day over last N business days up to anchor
+    - ETA = anchor + ceil(remaining_at_anchor / velocity) business days
     - Data quality = days with done>0 within window
     """
     if not all_days:
@@ -939,3 +823,70 @@ def forecast_eta_units(
     days_needed = int(math.ceil(rem_anchor / vel))
     eta = add_business_days(anchor_day, days_needed)
     return anchor_day, float(vel), eta, dq
+
+
+# =========================
+# Compatibility layer for app.py imports
+# =========================
+def build_burndown_series(
+    series_list: List[TaskSeries],
+    today: Optional[date] = None,
+    window_business_days: int = 10,
+) -> Dict[str, Any]:
+    """
+    App-facing helper:
+    returns a self-contained burndown/velocity package based on units.
+
+    Output keys (stable):
+      - all_days: List[date] (business days)
+      - done_units_day: List[float]
+      - remaining_units_day: List[float]
+      - comp_by_day: List[List[dict]]
+      - anchor_day: Optional[date]
+      - velocity: float
+      - eta: Optional[date]
+      - data_quality_days: int
+    """
+    if today is None:
+        today = date.today()
+
+    all_days, done_units_day, remaining_units_day, comp_by_day = compute_units_composition(series_list)
+
+    anchor_day, velocity, eta, dq = forecast_eta_units(
+        all_days=all_days,
+        done_units_day=done_units_day,
+        remaining_units_day=remaining_units_day,
+        today_=today,
+        window_business_days=int(window_business_days),
+    )
+
+    return {
+        "all_days": all_days,
+        "done_units_day": done_units_day,
+        "remaining_units_day": remaining_units_day,
+        "comp_by_day": comp_by_day,
+        "anchor_day": anchor_day,
+        "velocity": float(velocity or 0.0),
+        "eta": eta,
+        "data_quality_days": int(dq or 0),
+    }
+
+
+def calc_velocity(series_list: List[TaskSeries], today: Optional[date] = None, window_business_days: int = 10) -> float:
+    """
+    App-facing velocity number: avg done units per business day over last window.
+    """
+    if today is None:
+        today = date.today()
+    pkg = build_burndown_series(series_list, today=today, window_business_days=window_business_days)
+    return float(pkg.get("velocity", 0.0) or 0.0)
+
+
+def forecast_finish_date(series_list: List[TaskSeries], today: Optional[date] = None, window_business_days: int = 10) -> Optional[date]:
+    """
+    App-facing ETA date based on remaining units and velocity.
+    """
+    if today is None:
+        today = date.today()
+    pkg = build_burndown_series(series_list, today=today, window_business_days=window_business_days)
+    return pkg.get("eta")
