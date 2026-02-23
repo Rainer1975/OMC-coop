@@ -127,8 +127,9 @@ def render(ctx: dict) -> None:
             for s in buckets[stt]:
                 sid = s.series_id
 
-                # --- header: title + meta line
-                st.markdown(f"**{s.title}**")
+                # --- header: title (clickable) + meta line
+                if st.button(str(s.title or ""), key=f"kb_title_{sid}", use_container_width=True):
+                    open_detail(sid)
                 st.caption(_card_subline(s))
                 st.caption(_date_line(s))
 
@@ -151,14 +152,9 @@ def render(ctx: dict) -> None:
                     sync_lists_from_data()
 
                 state_key = f"kb_state_{sid}"
-
-                # ✅ Streamlit rule: if you use session_state[key], do NOT also pass index/value.
-                # Initialize once (and keep valid), then let the widget read/write session_state.
-                current_state = (getattr(s, "state", "") or "").strip().upper() or stt
-                if current_state not in KANBAN_STATES:
-                    current_state = "PLANNED"
-                if (state_key not in st.session_state) or (st.session_state.get(state_key) not in KANBAN_STATES):
-                    st.session_state[state_key] = current_state
+                # initialize selectbox state
+                if state_key not in st.session_state:
+                    st.session_state[state_key] = stt
 
                 c_state.selectbox(
                     label="",

@@ -110,7 +110,8 @@ def render(ctx: dict) -> None:
     s = next(x for x in st.session_state.series if x.series_id == sid)
 
     with safe_container(border=True):
-        st.markdown(f"**{s.title}**")
+        if st.button(str(s.title or ""), key=f"inbox_title_{s.series_id}"):
+            open_detail(s.series_id)
         st.caption(s.series_id)
 
         t_title = st.text_input("Title", value=s.title, key="inbox_edit_title")

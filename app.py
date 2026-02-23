@@ -357,7 +357,7 @@ if "focus_mode" not in st.session_state:
     st.session_state.focus_mode = False
 
 if "page" not in st.session_state:
-    st.session_state.page = "TODAY"
+    st.session_state.page = "HOME"
 if "page_prev" not in st.session_state:
     st.session_state.page_prev = "HOME"
 if "open_series" not in st.session_state:
@@ -513,17 +513,8 @@ def pick_from_list(
     idx = options.index(cur) if cur in options else 0
 
     pick = st.selectbox(label, options=options, index=idx, key=key)
-
-    # ✅ FORM-SAFE: Eingabefeld immer sichtbar (sonst erscheint es in Forms nie rechtzeitig)
-    new_key = f"{key}__new"
-    new_val = st.text_input(
-        f"{label} (new – nur wenn 'Add new...' gewählt)",
-        value=st.session_state.get(new_key, ""),
-        key=new_key,
-        placeholder=f"Neuen Wert für {label} eingeben …",
-    ).strip()
-
     if pick == ADD_NEW:
+        new_val = st.text_input(f"{label} (new)", value="", key=f"{key}__new").strip()
         if not new_val:
             return "" if require else ""
         new_val = re.sub(r"\s+", " ", new_val)
@@ -536,7 +527,6 @@ def pick_from_list(
                     st.session_state.lists.get("themes", []),
                 )
         return new_val
-
     return pick
 
 
@@ -911,12 +901,11 @@ k4.markdown(f"<div class='kpi'>{meta_n}</div><div class='kpi-label'>Meta</div>",
 st.sidebar.markdown("---")
 
 # Help icons: always available + context-sensitive
-with st.sidebar.expander("Hilfe", expanded=False):
-    hc1, hc2 = st.columns(2)
-    if hc1.button("❓ Hilfe", key="btn_help_full", use_container_width=True):
-        open_help("full")
-    if hc2.button("🧑‍🎓 Anfänger", key="btn_help_beginner", use_container_width=True):
-        open_help("beginner")
+hc1, hc2 = st.sidebar.columns(2)
+if hc1.button("❓ Hilfe", key="btn_help_full", use_container_width=True):
+    open_help("full")
+if hc2.button("🧑‍🎓 Anfänger", key="btn_help_beginner", use_container_width=True):
+    open_help("beginner")
 
 st.sidebar.caption("Hilfe ist kontextsensitiv: öffnet automatisch den passenden Abschnitt zur aktuellen Seite.")
 st.sidebar.markdown("---")
@@ -927,18 +916,12 @@ st.sidebar.markdown("---")
 # FIX: Dropdown darf nicht auf Home zurückspringen.
 # =========================
 NAV_SECTIONS = [
-    ("", [("Heute", "TODAY"), ("Board", "KANBAN"), ("Auswertung", "DASHBOARD")]),
-    ("Mehr…", [
-        ("Inbox", "INBOX"),
-        ("Employees", "EMPLOYEES"),
-        ("Burndown", "BURNDOWN"),
-        ("Gantt", "GANTT"),
-        ("Meta", "META"),
-        ("Admin", "ADMIN"),
-        ("Data", "DATA"),
-        ("Anfänger (15 Min)", "BEGINNER"),
-        ("Gesamte Anleitung", "HELP"),
-    ]),
+    ("Start", [("Home", "HOME")]),
+    # DETAIL ist kein eigener Menüpunkt (sonst springt Navigation bei Open/Back gerne falsch).
+    ("Dateneingabe", [("Inbox", "INBOX"), ("Today", "TODAY"), ("Employees", "EMPLOYEES")]),
+    ("Reporting", [("Kanban", "KANBAN"), ("Dashboard", "DASHBOARD"), ("Burndown", "BURNDOWN"), ("Gantt", "GANTT"), ("Meta", "META")]),
+    ("Wartung", [("Admin", "ADMIN"), ("Data", "DATA")]),
+    ("Hilfe", [("Anfänger (15 Min)", "BEGINNER"), ("Gesamte Anleitung", "HELP")]),
 ]
 
 display_to_code: dict[str, str] = {}
@@ -947,7 +930,7 @@ display_options: list[str] = []
 
 for sec, items in NAV_SECTIONS:
     for label, code in items:
-        disp = label if not sec else f"{sec} › {label}"
+        disp = f"{sec} › {label}"
         display_to_code[disp] = code
         code_to_display[code] = disp
         display_options.append(disp)

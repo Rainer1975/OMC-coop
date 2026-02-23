@@ -409,6 +409,8 @@ def _plot_gantt(
 def render(ctx: dict) -> None:
     st.title("Gantt")
 
+    open_detail = ctx.get("open_detail")
+
     today = _get_today(ctx)
 
     # load series
@@ -564,3 +566,19 @@ def render(ctx: dict) -> None:
         show_deps=show_deps,
         show_critical=show_crit,
     )
+
+
+    with st.expander('Open details (klick auf Titel)', expanded=False):
+        if callable(open_detail):
+            q = st.text_input('Filter', placeholder='search title…', key='gantt_open_filter')
+            shown = list(series_filtered)
+            if q:
+                qq = q.lower()
+                shown = [s for s in shown if qq in ((getattr(s,'title','') or '') + ' ' + (getattr(s,'project','') or '') + ' ' + (getattr(s,'owner','') or '')).lower()]
+            for s in shown[:50]:
+                sid = str(getattr(s,'series_id','') or '').strip()
+                if not sid:
+                    continue
+                if st.button(str(getattr(s,'title','') or ''), key=f'gantt_open_{sid}', use_container_width=True):
+                    open_detail(sid)
+                st.caption(f"{getattr(s,'project','')} · {getattr(s,'owner','')} · {getattr(s,'start','')}→{getattr(s,'end','')}")

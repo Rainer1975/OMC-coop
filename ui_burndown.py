@@ -92,6 +92,7 @@ def render(ctx: dict) -> None:
     compute_units_composition = ctx.get("compute_units_composition")
     forecast_eta_units = ctx.get("forecast_eta_units")
     series_total_units = ctx.get("series_total_units")
+    open_detail = ctx.get("open_detail")
 
     st.title("Burndown")
     st.caption("Selbsterklärend: *Remaining* (Units) sinkt, wenn ihr DONE quittiert. *Delivery speed* = quittierte Units/Tag (letzte 10 Arbeitstage).")
@@ -215,6 +216,9 @@ def render(ctx: dict) -> None:
         for s in tasks2:
             label = _series_label(s)
             with st.expander(label, expanded=False):
+                if callable(open_detail):
+                    if st.button("Open details", key=f"bd_open_{s.series_id}"):
+                        open_detail(s.series_id)
                 fig, days, ideal, actual, total = _plot_task_burndown(
                     s,
                     today=today,
