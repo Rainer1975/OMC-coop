@@ -1,283 +1,102 @@
 # ui_dashboard.py
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date
+from typing import Any, Dict, List, Optional
 
-import pandas as pd
 import streamlit as st
+import plotly.graph_objects as go  # ✅ FIX: required
 
 
-def _traffic(util: float) -> str:
-    """Return a simple traffic-light emoji for utilization."""
-    try:
-        u = float(util)
-    except Exception:
-        u = 0.0
-    # thresholds: green <=80%, yellow <=100%, red >100%
-    if u <= 0.80:
-        return "🟢"
-    if u <= 1.00:
-        return "🟡"
-    return "🔴"
+def render(ctx: Dict[str, Any]) -> None:
+    st.title("Delivery speed & Runway")
 
-
-def render(ctx: dict) -> None:
-    today = ctx["today"]
+    today: date = ctx["today"]
     visible_series = ctx["visible_series"]
-    is_task = ctx["is_task"]
-    is_overdue = ctx["is_overdue"]
+    build_burndown_series = ctx["build_burndown_series"]
 
-    compute_units_composition = ctx.get("compute_units_composition")
-    forecast_eta_units = ctx.get("forecast_eta_units")
-    series_total_units = ctx.get("series_total_units")
+    series = visible_series()
 
-    capacity_summary = ctx.get("capacity_summary")
-    week_window = ctx.get("week_window")
+    if not series:
+        st.info("No tasks available.")
+        return
 
-    employees = ctx.get("employees", [])
+    # ---------------- Filter row ----------------
+    c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 2, 1])
 
-    st.title("Dashboard")
-    st.caption("Reporting: Capacity/Workload + Delivery speed (Velocity) + Runway/Burndown.")
+    portfolios = sorted({getattr(s, "portfolio", "") for s in series if getattr(s, "portfolio", "")})
+    projects = sorted({getattr(s, "project", "") for s in series if getattr(s, "project", "")})
+    themes = sorted({getattr(s, "theme", "") for s in series if getattr(s, "theme", "")})
+    owners = sorted({getattr(s, "owner", "") for s in series if getattr(s, "owner", "")})
 
-    # =========================
-    # Capacity / Workload
-    # =========================
-    with st.container(border=True):
-        st.subheader("Capacity")
+    sel_port = c1.selectbox("Portfolio", ["All"] + portfolios)
+    sel_proj = c2.selectbox("Project", ["All"] + projects)
+    sel_theme = c3.selectbox("Theme", ["All"] + themes)
+    sel_owner = c4.selectbox("Owner", ["All"] + owners)
+    window = c5.number_input("Window (workdays)", min_value=5, max_value=30, value=10)
 
-        mode = st.selectbox(
-            "Zeitraum",
-            options=["This week", "This month"],
-            index=0,
-            key="cap_mode",
+    # ---------------- Filtering ----------------
+    filtered = []
+    for s in series:
+        if sel_port != "All" and getattr(s, "portfolio", "") != sel_port:
+            continue
+        if sel_proj != "All" and getattr(s, "project", "") != sel_proj:
+            continue
+        if sel_theme != "All" and getattr(s, "theme", "") != sel_theme:
+            continue
+        if sel_owner != "All" and getattr(s, "owner", "") != sel_owner:
+            continue
+        filtered.append(s)
+
+    if not filtered:
+        st.info("No matching tasks.")
+        return
+
+    # ---------------- Velocity / ETA ----------------
+    pkg = build_burndown_series(filtered, today=today, window_business_days=window)
+
+    remaining = pkg.get("remaining_units_day", [])
+    velocity = pkg.get("velocity", 0.0)
+    eta = pkg.get("eta", None)
+    all_days = pkg.get("all_days", [])
+    done = pkg.get("done_units_day", [])
+
+    if remaining:
+        remaining_now = remaining[-1]
+    else:
+        remaining_now = 0.0
+
+    scope = sum(done) + remaining_now
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Scope (units)", round(scope, 2))
+    k2.metric("Remaining (units)", round(remaining_now, 2))
+    k3.metric("Velocity", f"{round(velocity, 2)} u/day")
+    k4.metric("ETA", eta.isoformat() if eta else "—")
+
+    if velocity <= 0:
+        st.warning("Velocity basiert auf sehr wenigen aktiven DONE-Tagen – Forecast instabil.")
+
+    # ---------------- Chart ----------------
+    if not all_days:
+        return
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=all_days,
+            y=remaining,
+            mode="lines",
+            name="Remaining units",
         )
+    )
 
-        if mode == "This week" and callable(week_window):
-            ws, we = week_window(today)
-        else:
-            # month window
-            try:
-                ws = today.replace(day=1)
-                # next month first day - 1
-                if ws.month == 12:
-                    n1 = ws.replace(year=ws.year + 1, month=1, day=1)
-                else:
-                    n1 = ws.replace(month=ws.month + 1, day=1)
-                we = n1 - timedelta(days=1)
-            except Exception:
-                ws, we = today, today
+    fig.update_layout(
+        margin=dict(l=20, r=20, t=30, b=20),
+        height=350,
+        xaxis_title="Date",
+        yaxis_title="Units",
+    )
 
-        st.caption(f"Window: {ws.isoformat()} → {we.isoformat()} (business days)")
-
-        tasks_all = [s for s in visible_series() if is_task(s)]
-
-        # UI expects a list of rows; capacity_summary is optional
-        if callable(capacity_summary):
-            try:
-                cap_rows = capacity_summary(tasks_all, employees, today, ws, we)
-            except TypeError:
-                # fallback for capacity_summary that uses (series, employees, today, window='week')
-                try:
-                    window = "week" if mode == "This week" else "month"
-                    cap = capacity_summary(tasks_all, employees, today, window)
-                    # normalize to list if dict-like
-                    if isinstance(cap, dict):
-                        cap_rows = list((cap.get("rows") or cap.get("cap_rows") or []) or [])
-                    else:
-                        cap_rows = cap
-                except Exception:
-                    cap_rows = []
-            except Exception:
-                cap_rows = []
-        else:
-            cap_rows = []
-
-        if not cap_rows:
-            st.info("No capacity data (no tasks or missing function).")
-        else:
-            cols = st.columns(4)
-            for i, r in enumerate(cap_rows):
-                c = cols[i % 4]
-                emoji = _traffic(r.get("util", 0.0))
-                owner = r.get("owner") or "Unassigned"
-                planned = float(r.get("planned", 0.0))
-                cap = float(r.get("capacity", 1.0))
-                remaining = float(r.get("remaining", 0.0))
-                overdue = int(r.get("overdue", 0) or 0)
-                util_pct = int(round(100.0 * float(r.get("util", 0.0))))
-
-                c.markdown(f"**{emoji} {owner}**")
-                c.metric("Utilization", f"{util_pct}%")
-                c.caption(f"Planned {planned:.1f} / Cap {cap:.1f} · Remaining {remaining:.1f} · Overdue {overdue}")
-
-            with st.expander("Details", expanded=False):
-                df = pd.DataFrame(
-                    [
-                        {
-                            "Owner": r.get("owner", ""),
-                            "Planned": round(float(r.get("planned", 0.0)), 1),
-                            "Done": round(float(r.get("done", 0.0)), 1),
-                            "Remaining": round(float(r.get("remaining", 0.0)), 1),
-                            "Capacity": round(float(r.get("capacity", 0.0)), 1),
-                            "Util%": int(round(100.0 * float(r.get("util", 0.0)))),
-                            "Tasks": int(r.get("tasks", 0) or 0),
-                            "Overdue": int(r.get("overdue", 0) or 0),
-                        }
-                        for r in cap_rows
-                    ]
-                )
-                st.dataframe(df, use_container_width=True, hide_index=True)
-
-                # per owner task list
-                by_owner = {}
-                for s in tasks_all:
-                    oid = getattr(s, "owner_id", "") or ""
-                    if not oid:
-                        on = getattr(s, "owner", "") or ""
-                        oid = f"name:{on.lower()}" if on else "(unassigned)"
-                    by_owner.setdefault(oid, []).append(s)
-
-                for r in cap_rows:
-                    oid = r.get("owner_id")
-                    owner = r.get("owner")
-                    lst = by_owner.get(oid, [])
-                    if not lst:
-                        continue
-                    st.markdown(f"##### {owner}")
-                    rows = []
-                    for s in lst:
-                        try:
-                            if s.end < ws or s.start > we:
-                                continue
-                        except Exception:
-                            continue
-                        rows.append(
-                            {
-                                "Project": getattr(s, "project", ""),
-                                "Theme": getattr(s, "theme", ""),
-                                "Task": getattr(s, "title", ""),
-                                "Start": getattr(s, "start", "").isoformat() if getattr(s, "start", None) else "",
-                                "End": getattr(s, "end", "").isoformat() if getattr(s, "end", None) else "",
-                                "META": "META" if getattr(s, "is_meta", False) else "",
-                                "Overdue": "YES" if is_overdue(s, today) else "",
-                                "State": getattr(s, "state", ""),
-                            }
-                        )
-                    if rows:
-                        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-    # =========================
-    # Quick open (always defined!)
-    # =========================
-    tasks = [s for s in visible_series() if is_task(s)]  # <-- FIX: tasks is ALWAYS defined
-
-    st.caption("Open task (klick auf Titel)")
-    q = st.text_input("Filter", placeholder="search title…", key="dash_open_filter")
-
-    shown = tasks
-    if q:
-        qq = q.lower()
-        shown = [
-            s
-            for s in tasks
-            if qq
-            in ((getattr(s, "title", "") or "") + " " + (getattr(s, "project", "") or "") + " " + (getattr(s, "owner", "") or "")).lower()
-        ]
-
-    for s in shown[:25]:
-        if st.button(str(getattr(s, "title", "") or ""), key=f"dash_open_{s.series_id}", use_container_width=True):
-            if callable(ctx.get("open_detail")):
-                ctx["open_detail"](s.series_id)
-        try:
-            st.caption(
-                f"{getattr(s, 'project', '')} · {getattr(s, 'theme', '')} · {getattr(s, 'owner', '')} · {s.start.isoformat()}→{s.end.isoformat()}"
-            )
-        except Exception:
-            pass
-
-    # =========================
-    # Delivery speed + Runway (units-based)
-    # =========================
-    with st.container(border=True):
-        st.subheader("Delivery speed & Runway")
-        st.caption(
-            "Selbsterklärend: *Delivery speed* = quittierte Units/Tag (letzte 10 Arbeitstage). "
-            "*Runway* = verbleibende Units + Forecast-Enddatum."
-        )
-
-        tasks_all2 = [s for s in visible_series() if is_task(s)]
-        if not tasks_all2 or not callable(compute_units_composition) or not callable(forecast_eta_units):
-            st.info("No velocity/burndown data (no tasks or missing functions).")
-        else:
-            portfolios = sorted({(getattr(s, "portfolio", "") or "Default").strip() or "Default" for s in tasks_all2})
-            projects = sorted({(getattr(s, "project", "") or "").strip() for s in tasks_all2 if (getattr(s, "project", "") or "").strip()})
-            themes = sorted({(getattr(s, "theme", "") or "").strip() for s in tasks_all2 if (getattr(s, "theme", "") or "").strip()})
-            owners = sorted({(getattr(s, "owner", "") or "").strip() for s in tasks_all2 if (getattr(s, "owner", "") or "").strip()})
-
-            f1, f2, f3, f4, f5 = st.columns([2, 2, 2, 2, 2])
-            f_port = f1.multiselect("Portfolio", portfolios, default=[], key="dash_v_port")
-            f_proj = f2.multiselect("Project", projects, default=[], key="dash_v_proj")
-            f_theme = f3.multiselect("Theme", themes, default=[], key="dash_v_theme")
-            f_owner = f4.multiselect("Owner", owners, default=[], key="dash_v_owner")
-            win = int(f5.number_input("Window (workdays)", min_value=5, max_value=30, value=10, step=1, key="dash_v_win"))
-
-            def _ok(s):
-                if f_port and (getattr(s, "portfolio", "") or "Default").strip() not in f_port:
-                    return False
-                if f_proj and (getattr(s, "project", "") or "").strip() not in f_proj:
-                    return False
-                if f_theme and (getattr(s, "theme", "") or "").strip() not in f_theme:
-                    return False
-                if f_owner and (getattr(s, "owner", "") or "").strip() not in f_owner:
-                    return False
-                return True
-
-            tasks2 = [s for s in tasks_all2 if _ok(s)]
-            if not tasks2:
-                st.info("No tasks match filters.")
-            else:
-                all_days, done_u, rem_u, _ = compute_units_composition(tasks2)
-                anchor, vel, eta, dq = forecast_eta_units(all_days, done_u, rem_u, today, win)
-
-                # remaining today = value at last day <= today
-                rem_today = 0.0
-                if all_days:
-                    idx = 0
-                    for i, d in enumerate(all_days):
-                        if d <= today:
-                            idx = i
-                        else:
-                            break
-                    rem_today = float(rem_u[idx]) if idx < len(rem_u) else 0.0
-
-                scope = 0.0
-                if callable(series_total_units):
-                    try:
-                        scope = float(series_total_units(tasks2))
-                    except Exception:
-                        scope = 0.0
-                else:
-                    # fallback scope: sum weights if present else count
-                    for s in tasks2:
-                        try:
-                            scope += float(getattr(s, "weight", 1.0) or 1.0)
-                        except Exception:
-                            scope += 1.0
-
-                cA, cB, cC, cD = st.columns(4)
-                cA.metric("Scope (units)", f"{scope:.1f}")
-                cB.metric("Remaining (units)", f"{rem_today:.1f}")
-                cC.metric("Velocity", f"{float(vel or 0.0):.2f} u/day")
-                cD.metric("ETA", eta.isoformat() if eta else "—")
-
-                if int(dq or 0) <= 1 and float(vel or 0.0) > 0:
-                    st.warning("Velocity basiert auf sehr wenigen aktiven DONE-Tagen – Forecast ist instabil.")
-
-                # Burndown plot (simple)
-                if all_days:
-                    df = pd.DataFrame({"day": all_days, "done_units": done_u, "remaining_units": rem_u})
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(x=df["day"], y=df["remaining_units"], mode="lines+markers", name="Remaining"))
-                    fig.add_trace(go.Bar(x=df["day"], y=df["done_units"], name="Done/day"))
-                    fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10))
-                    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True)
