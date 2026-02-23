@@ -1,35 +1,39 @@
 # ui_dashboard.py
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pandas as pd
 import streamlit as st
 
 
 def _traffic(util: float) -> str:
-    # thresholds: green <=80%, yellow <=100%, red >100%
+    """Return a simple traffic-light emoji for utilization."""
     try:
         u = float(util)
     except Exception:
         u = 0.0
+    # thresholds: green <=80%, yellow <=100%, red >100%
     if u <= 0.80:
         return "🟢"
     if u <= 1.00:
         return "🟡"
     return "🔴"
 
+
 def render(ctx: dict) -> None:
     today = ctx["today"]
     visible_series = ctx["visible_series"]
     is_task = ctx["is_task"]
     is_overdue = ctx["is_overdue"]
-    progress_percent = ctx["progress_percent"]
-    compute_done_composition = ctx["compute_done_composition"]
-    forecast_eta = ctx["forecast_eta"]
+
     compute_units_composition = ctx.get("compute_units_composition")
     forecast_eta_units = ctx.get("forecast_eta_units")
     series_total_units = ctx.get("series_total_units")
+
     capacity_summary = ctx.get("capacity_summary")
     week_window = ctx.get("week_window")
+
     employees = ctx.get("employees", [])
 
     st.title("Dashboard")
@@ -59,8 +63,6 @@ def render(ctx: dict) -> None:
                     n1 = ws.replace(year=ws.year + 1, month=1, day=1)
                 else:
                     n1 = ws.replace(month=ws.month + 1, day=1)
-                from datetime import timedelta
-
                 we = n1 - timedelta(days=1)
             except Exception:
                 ws, we = today, today
@@ -68,15 +70,31 @@ def render(ctx: dict) -> None:
         st.caption(f"Window: {ws.isoformat()} → {we.isoformat()} (business days)")
 
         tasks_all = [s for s in visible_series() if is_task(s)]
+
+        # UI expects a list of rows; capacity_summary is optional
         if callable(capacity_summary):
-            cap_rows = capacity_summary(tasks_all, employees, today, ws, we)
+            try:
+                cap_rows = capacity_summary(tasks_all, employees, today, ws, we)
+            except TypeError:
+                # fallback for capacity_summary that uses (series, employees, today, window='week')
+                try:
+                    window = "week" if mode == "This week" else "month"
+                    cap = capacity_summary(tasks_all, employees, today, window)
+                    # normalize to list if dict-like
+                    if isinstance(cap, dict):
+                        cap_rows = list((cap.get("rows") or cap.get("cap_rows") or []) or [])
+                    else:
+                        cap_rows = cap
+                except Exception:
+                    cap_rows = []
+            except Exception:
+                cap_rows = []
         else:
             cap_rows = []
 
         if not cap_rows:
             st.info("No capacity data (no tasks or missing function).")
         else:
-            # compact tiles (max 4 per row)
             cols = st.columns(4)
             for i, r in enumerate(cap_rows):
                 c = cols[i % 4]
@@ -93,7 +111,6 @@ def render(ctx: dict) -> None:
                 c.caption(f"Planned {planned:.1f} / Cap {cap:.1f} · Remaining {remaining:.1f} · Overdue {overdue}")
 
             with st.expander("Details", expanded=False):
-                # show table + per-person task list
                 df = pd.DataFrame(
                     [
                         {
@@ -129,7 +146,6 @@ def render(ctx: dict) -> None:
                     st.markdown(f"##### {owner}")
                     rows = []
                     for s in lst:
-                        # overlap check
                         try:
                             if s.end < ws or s.start > we:
                                 continue
@@ -150,34 +166,53 @@ def render(ctx: dict) -> None:
                     if rows:
                         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-    st.caption('Open task (klick auf Titel)')
-    q = st.text_input('Filter', placeholder='search title…', key='dash_open_filter')
+    # =========================
+    # Quick open (always defined!)
+    # =========================
+    tasks = [s for s in visible_series() if is_task(s)]  # <-- FIX: tasks is ALWAYS defined
+
+    st.caption("Open task (klick auf Titel)")
+    q = st.text_input("Filter", placeholder="search title…", key="dash_open_filter")
+
     shown = tasks
     if q:
         qq = q.lower()
-        shown = [s for s in tasks if qq in ((s.title or '') + ' ' + (s.project or '') + ' ' + (s.owner or '')).lower()]
-    for s in shown[:25]:
-        if st.button(str(s.title or ''), key=f"dash_open_{s.series_id}", use_container_width=True):
-            ctx['open_detail'](s.series_id)
-        st.caption(f"{s.project} · {s.theme} · {s.owner} · {s.start.isoformat()}→{s.end.isoformat()}")
+        shown = [
+            s
+            for s in tasks
+            if qq
+            in ((getattr(s, "title", "") or "") + " " + (getattr(s, "project", "") or "") + " " + (getattr(s, "owner", "") or "")).lower()
+        ]
 
+    for s in shown[:25]:
+        if st.button(str(getattr(s, "title", "") or ""), key=f"dash_open_{s.series_id}", use_container_width=True):
+            if callable(ctx.get("open_detail")):
+                ctx["open_detail"](s.series_id)
+        try:
+            st.caption(
+                f"{getattr(s, 'project', '')} · {getattr(s, 'theme', '')} · {getattr(s, 'owner', '')} · {s.start.isoformat()}→{s.end.isoformat()}"
+            )
+        except Exception:
+            pass
 
     # =========================
     # Delivery speed + Runway (units-based)
     # =========================
     with st.container(border=True):
         st.subheader("Delivery speed & Runway")
-        st.caption("Selbsterklärend: *Delivery speed* = quittierte Units/Tag (letzte 10 Arbeitstage). *Runway* = verbleibende Units + Forecast-Enddatum.")
+        st.caption(
+            "Selbsterklärend: *Delivery speed* = quittierte Units/Tag (letzte 10 Arbeitstage). "
+            "*Runway* = verbleibende Units + Forecast-Enddatum."
+        )
 
-        tasks_all = [s for s in visible_series() if is_task(s)]
-        if not tasks_all or not callable(compute_units_composition) or not callable(forecast_eta_units):
+        tasks_all2 = [s for s in visible_series() if is_task(s)]
+        if not tasks_all2 or not callable(compute_units_composition) or not callable(forecast_eta_units):
             st.info("No velocity/burndown data (no tasks or missing functions).")
         else:
-            # lightweight filters
-            portfolios = sorted({(getattr(s, "portfolio", "") or "Default").strip() or "Default" for s in tasks_all})
-            projects = sorted({(getattr(s, "project", "") or "").strip() for s in tasks_all if (getattr(s, "project", "") or "").strip()})
-            themes = sorted({(getattr(s, "theme", "") or "").strip() for s in tasks_all if (getattr(s, "theme", "") or "").strip()})
-            owners = sorted({(getattr(s, "owner", "") or "").strip() for s in tasks_all if (getattr(s, "owner", "") or "").strip()})
+            portfolios = sorted({(getattr(s, "portfolio", "") or "Default").strip() or "Default" for s in tasks_all2})
+            projects = sorted({(getattr(s, "project", "") or "").strip() for s in tasks_all2 if (getattr(s, "project", "") or "").strip()})
+            themes = sorted({(getattr(s, "theme", "") or "").strip() for s in tasks_all2 if (getattr(s, "theme", "") or "").strip()})
+            owners = sorted({(getattr(s, "owner", "") or "").strip() for s in tasks_all2 if (getattr(s, "owner", "") or "").strip()})
 
             f1, f2, f3, f4, f5 = st.columns([2, 2, 2, 2, 2])
             f_port = f1.multiselect("Portfolio", portfolios, default=[], key="dash_v_port")
@@ -197,15 +232,15 @@ def render(ctx: dict) -> None:
                     return False
                 return True
 
-            tasks = [s for s in tasks_all if _ok(s)]
-            if not tasks:
+            tasks2 = [s for s in tasks_all2 if _ok(s)]
+            if not tasks2:
                 st.info("No tasks match filters.")
             else:
-                all_days, done_u, rem_u, _ = compute_units_composition(tasks)
+                all_days, done_u, rem_u, _ = compute_units_composition(tasks2)
                 anchor, vel, eta, dq = forecast_eta_units(all_days, done_u, rem_u, today, win)
 
                 # remaining today = value at last day <= today
-                rem_today = None
+                rem_today = 0.0
                 if all_days:
                     idx = 0
                     for i, d in enumerate(all_days):
@@ -214,68 +249,35 @@ def render(ctx: dict) -> None:
                         else:
                             break
                     rem_today = float(rem_u[idx]) if idx < len(rem_u) else 0.0
-                rem_today = float(rem_today or 0.0)
 
                 scope = 0.0
                 if callable(series_total_units):
-                    scope = float(sum(series_total_units(s) for s in tasks))
+                    try:
+                        scope = float(series_total_units(tasks2))
+                    except Exception:
+                        scope = 0.0
                 else:
-                    scope = float(len(tasks))
+                    # fallback scope: sum weights if present else count
+                    for s in tasks2:
+                        try:
+                            scope += float(getattr(s, "weight", 1.0) or 1.0)
+                        except Exception:
+                            scope += 1.0
 
-                # data quality label
-                if dq >= max(3, win // 2):
-                    dq_label = "High"
-                elif dq >= 2:
-                    dq_label = "Med"
-                else:
-                    dq_label = "Low"
+                cA, cB, cC, cD = st.columns(4)
+                cA.metric("Scope (units)", f"{scope:.1f}")
+                cB.metric("Remaining (units)", f"{rem_today:.1f}")
+                cC.metric("Velocity", f"{float(vel or 0.0):.2f} u/day")
+                cD.metric("ETA", eta.isoformat() if eta else "—")
 
-                m1, m2, m3, m4 = st.columns([2, 2, 2, 3])
-                m1.metric("Remaining (units)", f"{rem_today:.1f}")
-                m2.metric("Delivery speed", f"{vel:.2f} units/day")
-                m3.metric("Forecast finish", eta.isoformat() if eta else "—")
-                m4.caption(f"Scope: {scope:.1f} units · Data quality: {dq_label} (done-days in window: {dq}/{win})")
+                if int(dq or 0) <= 1 and float(vel or 0.0) > 0:
+                    st.warning("Velocity basiert auf sehr wenigen aktiven DONE-Tagen – Forecast ist instabil.")
 
-                if vel > 0 and rem_today > 0:
-                    import math
-
-                    days_needed = int(math.ceil(rem_today / vel))
-                    st.caption(f"At current speed: ~{days_needed} workdays remaining.")
-                elif rem_today <= 0:
-                    st.caption("Nothing remaining (already burned down).")
-                else:
-                    st.caption("No recent completions → delivery speed is 0. Forecast is not possible.")
-
-    tasks = [s for s in visible_series() if is_task(s)]
-    if not tasks:
-        st.info("No tasks.")
-        return
-
-    rows = []
-    for s in tasks:
-        rows.append(
-            {
-                "Project": s.project,
-                "Theme": s.theme,
-                "Owner": s.owner,
-                "Owner ID": getattr(s, "owner_id", ""),
-                "Task": s.title,
-                "Start": s.start.isoformat(),
-                "End": s.end.isoformat(),
-                "META": "META" if s.is_meta else "",
-                "Progress %": progress_percent(s),
-                "Overdue": "YES" if is_overdue(s, today) else "",
-                "State": getattr(s,"state","PLANNED"),
-                "Depends count": len(getattr(s,"predecessors",[]) or []),
-            }
-        )
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-    st.divider()
-    fc_window = st.number_input("Forecast window (days)", min_value=3, max_value=30, value=7, step=1, key="dash_fc_win")
-    all_days, done_port, rem_port, _ = compute_done_composition(tasks)
-    anchor, vel, eta = forecast_eta(all_days, done_port, rem_port, today, int(fc_window))
-    st.caption(
-        f"Portfolio Forecast ETA: {eta.isoformat() if eta else '—'} · "
-        f"Velocity(avg/day): {vel:.2f} · Anchor: {anchor.isoformat() if anchor else '—'}"
-    )
+                # Burndown plot (simple)
+                if all_days:
+                    df = pd.DataFrame({"day": all_days, "done_units": done_u, "remaining_units": rem_u})
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=df["day"], y=df["remaining_units"], mode="lines+markers", name="Remaining"))
+                    fig.add_trace(go.Bar(x=df["day"], y=df["done_units"], name="Done/day"))
+                    fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10))
+                    st.plotly_chart(fig, use_container_width=True)
