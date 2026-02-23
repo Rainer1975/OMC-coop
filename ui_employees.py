@@ -172,7 +172,12 @@ def render(ctx: dict) -> None:
             t_start = c1.date_input("Start", today, key=f"emp_task_start_{pick_id}")
             t_end = c2.date_input("End", today, key=f"emp_task_end_{pick_id}")
 
-            t_meta = st.checkbox("META", value=False, key=f"emp_task_meta_{pick_id}", disabled=st.session_state.get("focus_mode", False))
+            t_meta = st.checkbox(
+                "META",
+                value=False,
+                key=f"emp_task_meta_{pick_id}",
+                disabled=st.session_state.get("focus_mode", False),
+            )
 
             ok = st.form_submit_button("Create task")
 
@@ -355,13 +360,44 @@ def render(ctx: dict) -> None:
 
     # quick list with open
     with st.expander("📋 Tasks (open detail)", expanded=True):
-        for s in sorted(tasks, key=lambda x: (getattr(x, "start", today), getattr(x, "end", today), _norm(getattr(x, "title", "")))):
+        for s in sorted(
+            tasks,
+            key=lambda x: (getattr(x, "start", today), getattr(x, "end", today), _norm(getattr(x, "title", ""))),
+        ):
             c1, c2, c3, c4 = st.columns([5, 2, 2, 3])
             if c1.button(s.title or "", key=f"emp_title_{s.series_id}"):
                 open_detail(s.series_id)
             c2.write(f"{s.start.isoformat()} → {s.end.isoformat()}")
             c3.write(getattr(s, "state", ""))
             c4.empty()
+
+    # quick list with open (appointments)  ✅ NEW
+    appts = [s for s in st.session_state.series if is_appointment(s) and getattr(s, "owner_id", "") == pick_id]
+    if st.session_state.get("focus_mode"):
+        # focus mode already disables appointment creation; keep them hidden here as well
+        appts = []
+
+    if appts:
+        with st.expander("📅 Appointments (open detail)", expanded=True):
+            for s in sorted(
+                appts,
+                key=lambda x: (getattr(x, "start", today), getattr(x, "end", today), _norm(getattr(x, "title", ""))),
+            ):
+                c1, c2, c3, c4 = st.columns([5, 2, 2, 3])
+                if c1.button(s.title or "", key=f"emp_appt_title_{s.series_id}"):
+                    open_detail(s.series_id)
+                c2.write(f"{s.start.isoformat()} → {s.end.isoformat()}")
+                ts = getattr(s, "time_start", "") or ""
+                te = getattr(s, "time_end", "") or ""
+                if ts or te:
+                    c3.write(f"{ts}–{te}".strip("–"))
+                else:
+                    c3.empty()
+                loc = getattr(s, "location", "") or ""
+                if loc:
+                    c4.write(loc)
+                else:
+                    c4.empty()
 
     # Grid editor: choose dates to set done
     st.markdown("**DONE setzen (mehrere Einträge, quittierungspflichtig):**")
