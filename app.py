@@ -38,394 +38,121 @@ from core import (
     unmark_done,
     would_create_cycle,
     capacity_summary,
-    week_window,
     compute_units_composition,
-    forecast_eta_units,
-    series_total_units,
+    build_burndown_series,
+    calc_velocity,
+    forecast_finish_date,
 )
 
-try:
-    from core import critical_path_series  # optional
-except Exception:
-    critical_path_series = None  # type: ignore
+from ui_admin import render as render_admin
+from ui_burndown import render as render_burndown
+from ui_dashboard import render as render_dashboard
+from ui_data import render as render_data
+from ui_detail import render as render_detail
+from ui_employees import render as render_employees
+from ui_gantt import render as render_gantt
+from ui_home import render as render_home
+from ui_kanban import render as render_kanban
+
+APP_TITLE = "OMG Coop"
+
+STATE_PATH = Path("data.json")
+EMP_PATH = Path("employees.json")
+LISTS_PATH = Path("lists.json")
+
+ADD_NEW = "➕ Add new..."
+
+DEFAULT_LISTS = {
+    "portfolios": ["Default"],
+    "projects": [],
+    "themes": ["General", "Termin"],
+}
 
 
-# =========================
-# Config / CSS
-# =========================
-st.set_page_config(page_title="OMG Coop", layout="wide")
-
-st.markdown(
-    """
-<style>
-.block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
-h1, h2, h3 { letter-spacing: -0.02em; }
-.kpi { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
-.kpi-label { font-size: 12px; opacity: .65; }
-hr { opacity: .25; }
-code { font-size: 0.9em; }
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-APP_DIR = Path(__file__).resolve().parent
-
-# Data directory for internet deployments:
-# - default: repo/app folder (works locally)
-# - optional: set env var OMG_COOP_DATA_DIR to a writable path (e.g. a mounted volume)
-DATA_DIR = Path(os.getenv("OMG_COOP_DATA_DIR", str(APP_DIR))).resolve()
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-DATA_FILE = DATA_DIR / "data.json"
-EMP_FILE = DATA_DIR / "employees.json"
-LISTS_FILE = DATA_DIR / "lists.json"
-
-today = date.today()
-
-ADD_NEW = "➕ Add new…"
-TASK_STATES = ["PLANNED", "ACTIVE", "BLOCKED", "DONE", "CANCELLED"]
-
-
-# =========================
-# Atomic JSON writes
-# =========================
-def _acquire_lock(lock_path: Path, timeout_s: float = 5.0, poll_s: float = 0.05) -> int:
-    import time as _time
-
-    start = _time.monotonic()
-    while True:
-        try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
-            try:
-                os.write(fd, str(os.getpid()).encode("utf-8", errors="ignore"))
-            except Exception:
-                pass
-            return fd
-        except FileExistsError:
-            if (_time.monotonic() - start) >= timeout_s:
-                raise TimeoutError(f"Could not acquire lock: {lock_path}")
-            _time.sleep(poll_s)
-
-
-def _release_lock(fd: int, lock_path: Path) -> None:
-    try:
-        try:
-            os.close(fd)
-        finally:
-            if lock_path.exists():
-                lock_path.unlink()
-    except Exception:
-        pass
-
-
-def _atomic_write_json(path: Path, payload: dict) -> None:
-    folder = path.parent
-    folder.mkdir(parents=True, exist_ok=True)
-
-    lock_path = path.with_suffix(path.suffix + ".lock")
-    fd = _acquire_lock(lock_path)
-    try:
-        fd2, tmp_path = tempfile.mkstemp(prefix="omg_", suffix=".tmp", dir=str(folder))
-        try:
-            with os.fdopen(fd2, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, str(path))
-        finally:
-            try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-            except Exception:
-                pass
-    finally:
-        _release_lock(fd, lock_path)
-
-
-# =========================
-# Small helpers
-# =========================
 def _norm(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip()).lower()
+    return re.sub(r"\s+", " ", (s or "").strip())
 
 
-def _slugify(s: str) -> str:
-    s = (s or "").strip().lower()
-    s = re.sub(r"[^a-z0-9]+", "_", s).strip("_")
-    return s or "unknown"
-
-
-# =========================
-# Employees
-# =========================
-def load_employees() -> list[dict]:
-    if not EMP_FILE.exists():
-        return []
-    try:
-        payload = json.loads(EMP_FILE.read_text(encoding="utf-8", errors="replace"))
-    except Exception:
-        return []
-
-    if isinstance(payload, list):
-        names = [str(x).strip() for x in payload if str(x).strip()]
-        out = [{"id": _slugify(n), "display_name": n, "aliases": [n]} for n in names]
-        out.sort(key=lambda x: _norm(x["display_name"]))
-        return out
-
-    if isinstance(payload, dict):
-        emps = payload.get("employees", [])
-        if isinstance(emps, list) and emps and isinstance(emps[0], str):
-            names = [str(x).strip() for x in emps if str(x).strip()]
-            out = [{"id": _slugify(n), "display_name": n, "aliases": [n]} for n in names]
-            out.sort(key=lambda x: _norm(x["display_name"]))
-            return out
-
-        if isinstance(emps, list):
-            out: list[dict] = []
-            for e in emps:
-                if not isinstance(e, dict):
-                    continue
-                dn = str(e.get("display_name", "")).strip()
-                if not dn:
-                    continue
-                eid = str(e.get("id", "")).strip() or _slugify(dn)
-                aliases = e.get("aliases", []) if isinstance(e.get("aliases", []), list) else []
-                aliases = [str(a).strip() for a in aliases if str(a).strip()]
-                if dn and dn not in aliases:
-                    aliases = [dn] + aliases
-                out.append({"id": eid, "display_name": dn, "aliases": aliases})
-            out.sort(key=lambda x: _norm(x["display_name"]))
-            return out
-
-    return []
-
-
-def save_employees(employees: list[dict]) -> None:
-    cleaned: list[dict] = []
+def _list_union(a: list[str], b: list[str]) -> list[str]:
+    out = []
     seen = set()
-    for e in employees or []:
-        if not isinstance(e, dict):
+    for x in (a or []) + (b or []):
+        x = _norm(x)
+        if not x:
             continue
-        dn = str(e.get("display_name", "")).strip()
-        if not dn:
+        k = x.lower()
+        if k in seen:
             continue
-        eid = str(e.get("id", "")).strip() or _slugify(dn)
-        if eid in seen:
-            continue
-        seen.add(eid)
-        aliases = e.get("aliases", []) if isinstance(e.get("aliases", []), list) else []
-        aliases = [str(a).strip() for a in aliases if str(a).strip()]
-        if dn and dn not in aliases:
-            aliases = [dn] + aliases
-        cleaned.append({"id": eid, "display_name": dn, "aliases": aliases})
-    cleaned.sort(key=lambda x: _norm(x["display_name"]))
-    _atomic_write_json(EMP_FILE, {"schema_version": 1, "employees": cleaned})
-
-
-def resolve_owner_id(owner_display: str, employees: list[dict]) -> str:
-    od = _norm(owner_display)
-    for e in employees or []:
-        if _norm(e.get("display_name", "")) == od:
-            return str(e.get("id", "")).strip()
-        for a in e.get("aliases", []) or []:
-            if _norm(a) == od:
-                return str(e.get("id", "")).strip()
-    return _slugify(owner_display) if (owner_display or "").strip() else ""
-
-
-def display_name_for_owner_id(owner_id: str, employees: list[dict]) -> str:
-    oid = (owner_id or "").strip()
-    if not oid:
-        return ""
-    for e in employees or []:
-        if str(e.get("id", "")).strip() == oid:
-            return str(e.get("display_name", "")).strip()
-    return ""
-
-
-# =========================
-# Lists
-# =========================
-def load_lists() -> dict:
-    if not LISTS_FILE.exists():
-        return {"portfolios": [], "projects": [], "themes": []}
-    try:
-        payload = json.loads(LISTS_FILE.read_text(encoding="utf-8", errors="replace"))
-        if not isinstance(payload, dict):
-            return {"portfolios": [], "projects": [], "themes": []}
-
-        def norm_list(xs: Any) -> list[str]:
-            if not isinstance(xs, list):
-                return []
-            out: list[str] = []
-            for x in xs:
-                s = re.sub(r"\s+", " ", str(x).strip())
-                if s and s not in out:
-                    out.append(s)
-            return out
-
-        return {
-            "portfolios": norm_list(payload.get("portfolios", [])),
-            "projects": norm_list(payload.get("projects", [])),
-            "themes": norm_list(payload.get("themes", [])),
-        }
-    except Exception:
-        return {"portfolios": [], "projects": [], "themes": []}
-
-
-def save_lists(portfolios: list[str], projects: list[str], themes: list[str]) -> None:
-    def uniq(xs: list[str]) -> list[str]:
-        out: list[str] = []
-        for x in xs:
-            s = re.sub(r"\s+", " ", (x or "").strip())
-            if s and s not in out:
-                out.append(s)
-        return out
-
-    _atomic_write_json(
-        LISTS_FILE,
-        {
-            "portfolios": uniq(portfolios),
-            "projects": uniq(projects),
-            "themes": uniq(themes),
-        },
-    )
-
-
-def _list_union(existing: list[str], incoming: list[str]) -> list[str]:
-    out: list[str] = []
-    for x in (existing or []) + (incoming or []):
-        s = re.sub(r"\s+", " ", (x or "").strip())
-        if s and s not in out:
-            out.append(s)
+        seen.add(k)
+        out.append(x)
     return out
 
 
-def sync_lists_from_data() -> None:
-    pf: list[str] = []
-    pr: list[str] = []
-    th: list[str] = []
-
-    for s in st.session_state.series:
-        pfv = re.sub(r"\s+", " ", (getattr(s, "portfolio", "") or "").strip())
-        prv = re.sub(r"\s+", " ", (getattr(s, "project", "") or "").strip())
-        thv = re.sub(r"\s+", " ", (getattr(s, "theme", "") or "").strip())
-        if pfv:
-            pf.append(pfv)
-        if prv:
-            pr.append(prv)
-        if thv:
-            th.append(thv)
-
-    cur = st.session_state.lists
-    new_pf = _list_union(cur.get("portfolios", []), pf)
-    new_pr = _list_union(cur.get("projects", []), pr)
-    new_th = _list_union(cur.get("themes", []), th)
-
-    if new_pf != cur.get("portfolios", []) or new_pr != cur.get("projects", []) or new_th != cur.get("themes", []):
-        st.session_state.lists["portfolios"] = new_pf
-        st.session_state.lists["projects"] = new_pr
-        st.session_state.lists["themes"] = new_th
-        save_lists(new_pf, new_pr, new_th)
+def load_employees() -> list[dict[str, Any]]:
+    if not EMP_PATH.exists():
+        return []
+    try:
+        data = json.loads(EMP_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return data
+    except Exception:
+        pass
+    return []
 
 
-# =========================
-# Persistence
-# =========================
+def save_employees(employees: list[dict[str, Any]]) -> None:
+    EMP_PATH.write_text(json.dumps(employees, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_lists() -> dict[str, list[str]]:
+    if not LISTS_PATH.exists():
+        return dict(DEFAULT_LISTS)
+    try:
+        data = json.loads(LISTS_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            out = dict(DEFAULT_LISTS)
+            for k in DEFAULT_LISTS:
+                if k in data and isinstance(data[k], list):
+                    out[k] = [_norm(x) for x in data[k] if _norm(x)]
+            return out
+    except Exception:
+        pass
+    return dict(DEFAULT_LISTS)
+
+
+def save_lists(portfolios: list[str], projects: list[str], themes: list[str]) -> None:
+    data = {
+        "portfolios": _list_union(["Default"], portfolios),
+        "projects": _list_union([], projects),
+        "themes": _list_union(["General", "Termin"], themes),
+    }
+    LISTS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def persist() -> None:
-    save_state(str(DATA_FILE), st.session_state.series)
+    save_state(STATE_PATH, st.session_state.series)
 
 
-def load_or_empty() -> list[TaskSeries]:
-    loaded = load_state(str(DATA_FILE))
-    return loaded if loaded else []
+def sync_lists_from_data() -> None:
+    # build lists from series + employees forms
+    portfolios = set()
+    projects = set()
+    themes = set()
+    for s in st.session_state.series:
+        portfolios.add(_norm(getattr(s, "portfolio", "") or "Default") or "Default")
+        if _norm(getattr(s, "project", "")):
+            projects.add(_norm(getattr(s, "project", "")))
+        if _norm(getattr(s, "theme", "")):
+            themes.add(_norm(getattr(s, "theme", "")))
 
-
-# =========================
-# Session init
-# =========================
-if "series" not in st.session_state:
-    st.session_state.series = load_or_empty()
-    persist()
-
-if "employees" not in st.session_state:
-    st.session_state.employees = load_employees()
-
-if "lists" not in st.session_state:
-    st.session_state.lists = load_lists()
-
-if "focus_mode" not in st.session_state:
-    st.session_state.focus_mode = False
-
-if "page" not in st.session_state:
-    st.session_state.page = "HOME"
-if "page_prev" not in st.session_state:
-    st.session_state.page_prev = "HOME"
-if "open_series" not in st.session_state:
-    st.session_state.open_series = None
-
-if "pending_done" not in st.session_state:
-    st.session_state.pending_done = None
-
-# Help state
-if "help_mode" not in st.session_state:
-    st.session_state.help_mode = "full"  # "full" | "beginner"
-if "help_target" not in st.session_state:
-    st.session_state.help_target = None  # section key
-
-# NAV: wichtig – verhindert "springt zurück auf Home"
-if "nav_force_sync" not in st.session_state:
-    st.session_state.nav_force_sync = True  # initial einmal synchronisieren
-
-# Backward-compat defaults
-changed = False
-for s in st.session_state.series:
-    if not getattr(s, "owner_id", "").strip():
-        s.owner_id = resolve_owner_id(getattr(s, "owner", ""), st.session_state.employees)
-        changed = True
-    if (not (getattr(s, "owner", "") or "").strip()) and getattr(s, "owner_id", "").strip():
-        dn = display_name_for_owner_id(s.owner_id, st.session_state.employees)
-        if dn:
-            s.owner = dn
-            changed = True
-
-    if not hasattr(s, "portfolio") or not (getattr(s, "portfolio", "") or "").strip():
-        try:
-            s.portfolio = "Default"
-            changed = True
-        except Exception:
-            pass
-
-    if not hasattr(s, "state") or not (getattr(s, "state", "") or "").strip():
-        try:
-            if is_task(s) and is_completed(s, today):
-                s.state = "DONE"
-            else:
-                s.state = "ACTIVE" if is_task(s) and is_active(s, today) else "PLANNED"
-            changed = True
-        except Exception:
-            pass
-
-if "Default" not in st.session_state.lists.get("portfolios", []):
-    st.session_state.lists["portfolios"] = ["Default"] + st.session_state.lists.get("portfolios", [])
+    st.session_state.lists["portfolios"] = _list_union(["Default"], sorted(portfolios))
+    st.session_state.lists["projects"] = _list_union([], sorted(projects))
+    st.session_state.lists["themes"] = _list_union(["General", "Termin"], sorted(themes))
     save_lists(
         st.session_state.lists.get("portfolios", []),
         st.session_state.lists.get("projects", []),
         st.session_state.lists.get("themes", []),
     )
-
-sync_lists_from_data()
-if changed:
-    persist()
-
-
-# =========================
-# UI helpers
-# =========================
-def safe_container(border: bool = False):
-    try:
-        return st.container(border=border)
-    except TypeError:
-        return st.container()
 
 
 def segmented(label: str, options: list[str], default: str):
@@ -487,15 +214,11 @@ def visible_series() -> list[TaskSeries]:
                 continue
             if is_appointment(s):
                 continue
-            if is_task(s) and is_completed(s, today):
-                continue
+            # focus shows only "active tasks" in many places
         out.append(s)
     return out
 
 
-# =========================
-# Pickers
-# =========================
 def pick_from_list(
     label: str,
     key: str,
@@ -504,20 +227,31 @@ def pick_from_list(
     require: bool = True,
     list_key: str = "",
 ) -> str:
-    values = [re.sub(r"\s+", " ", (v or "").strip()) for v in (values or []) if (v or "").strip()]
-    cur = re.sub(r"\s+", " ", (current or "").strip())
+    values = [_norm(v) for v in (values or []) if _norm(v)]
+    cur = _norm(current)
+
     if cur and cur not in values:
         values = [cur] + values
 
     options = values + [ADD_NEW] if values else [ADD_NEW]
+
     idx = options.index(cur) if cur in options else 0
 
     pick = st.selectbox(label, options=options, index=idx, key=key)
+
+    # FORM-SAFE: Eingabefeld immer sichtbar (sonst erscheint es in Forms nie rechtzeitig)
+    new_key = f"{key}__new"
+    new_val = st.text_input(
+        f"{label} (new – nur wenn 'Add new...' gewählt)",
+        value=st.session_state.get(new_key, ""),
+        key=new_key,
+        placeholder=f"Neuen Wert für {label} eingeben …",
+    ).strip()
+
     if pick == ADD_NEW:
-        new_val = st.text_input(f"{label} (new)", value="", key=f"{key}__new").strip()
         if not new_val:
             return "" if require else ""
-        new_val = re.sub(r"\s+", " ", new_val)
+        new_val = _norm(new_val)
         if list_key:
             if new_val not in st.session_state.lists.get(list_key, []):
                 st.session_state.lists[list_key] = _list_union(st.session_state.lists.get(list_key, []), [new_val])
@@ -527,406 +261,122 @@ def pick_from_list(
                     st.session_state.lists.get("themes", []),
                 )
         return new_val
+
     return pick
 
 
-def pick_owner(
-    label: str,
-    key: str,
-    current_owner_id: str,
-    current_owner_display: str,
-    employees: list[dict],
-) -> tuple[str, str]:
-    emps = employees or []
-    options = [(e["display_name"], e["id"]) for e in emps if (e.get("id") and e.get("display_name"))]
-    options.sort(key=lambda x: _norm(x[0]))
-    labels = [x[0] for x in options]
-    ids = [x[1] for x in options]
-
-    cur_display = (current_owner_display or "").strip()
-    cur_id = (current_owner_id or "").strip()
-
-    if cur_id and not cur_display:
-        cur_display = display_name_for_owner_id(cur_id, employees)
-
-    if cur_display and (cur_display not in labels):
-        labels = [cur_display] + labels
-        ids = [resolve_owner_id(cur_display, employees)] + ids
-
-    labels = labels + [ADD_NEW] if labels else [ADD_NEW]
-    idx = labels.index(cur_display) if cur_display in labels else 0
-
-    pick = st.selectbox(label, options=labels, index=idx, key=key)
-    if pick == ADD_NEW:
-        new_val = st.text_input(f"{label} (new)", value="", key=f"{key}__new").strip()
-        if not new_val:
-            return "", ""
-        return resolve_owner_id(new_val, employees), new_val
-
-    if pick in [x[0] for x in options]:
-        oid = ids[[x[0] for x in options].index(pick)]
-    else:
-        oid = resolve_owner_id(pick, employees)
-    return oid, pick
-
-
-# =========================
-# DONE confirmation (unchanged)
-# =========================
-def request_done_single(series_id: str, d: date, reason: str) -> None:
-    if d > today:
-        st.warning("Future is disabled: cannot set DONE in the future.")
-        return
-    st.session_state.pending_done = {"type": "single", "series_id": series_id, "day_iso": d.isoformat(), "reason": reason}
-    st.rerun()
-
-
-def request_done_grid(items: list[dict], reason: str) -> None:
-    items = [it for it in (items or []) if date.fromisoformat(it["day_iso"]) <= today]
-    if not items:
-        st.warning("Nothing to confirm (future disabled).")
-        return
-    st.session_state.pending_done = {"type": "grid", "items": items, "reason": reason}
-    st.rerun()
-
-
-def clear_pending() -> None:
-    st.session_state.pending_done = None
-
-
-def render_pending_banner() -> None:
-    pdn = st.session_state.pending_done
-    if not pdn:
-        return
-
-    with safe_container(border=True):
-        if pdn["type"] == "single":
-            s = find_series(pdn["series_id"])
-            d = date.fromisoformat(pdn["day_iso"])
-            if d in getattr(s, "done_days", set()):
-                clear_pending()
-                st.rerun()
-
-            st.warning(f"Quittierung nötig: **{s.title}** ({s.owner}) am **{d.isoformat()}** als **DONE** setzen?")
-            st.caption(pdn.get("reason", ""))
-
-            c1, c2, c3 = st.columns([2, 2, 6])
-            if c1.button("✅ Quittieren (DONE setzen)", key=f"confirm_single_{s.series_id}_{d}"):
-                if "actor" in mark_done.__code__.co_varnames:
-                    mark_done(s, d, actor="ui")
-                else:
-                    mark_done(s, d)
-                try:
-                    if is_task(s) and is_completed(s, today):
-                        s.state = "DONE"
-                except Exception:
-                    pass
-                persist()
-                clear_pending()
-                st.rerun()
-            if c2.button("↩️ Abbrechen", key=f"cancel_single_{s.series_id}_{d}"):
-                clear_pending()
-                st.rerun()
-            c3.caption("DONE entfernen ist sofort (für Korrekturen).")
-
-        elif pdn["type"] == "grid":
-            items = pdn.get("items") or []
-            st.warning(f"Quittierung nötig: **{len(items)}** Grid-Einträge als DONE setzen?")
-            st.caption(pdn.get("reason", ""))
-
-            c1, c2, c3 = st.columns([2, 2, 6])
-            if c1.button("✅ Quittieren (Grid DONE)", key="confirm_grid"):
-                by_series: dict[str, list[date]] = {}
-                for it in items:
-                    sid = it["series_id"]
-                    dd = date.fromisoformat(it["day_iso"])
-                    if dd > today:
-                        continue
-                    by_series.setdefault(sid, []).append(dd)
-
-                changed_total = 0
-                for sid, ds in by_series.items():
-                    s = find_series(sid)
-                    if "actor" in bulk_set_done.__code__.co_varnames:
-                        changed_total += bulk_set_done(s, ds, set_done=True, actor=s.owner)
-                    else:
-                        changed_total += bulk_set_done(s, ds, set_done=True)
-                    try:
-                        if is_task(s) and is_completed(s, today):
-                            s.state = "DONE"
-                        elif is_task(s) and (getattr(s, "state", "") == "PLANNED") and is_active(s, today):
-                            s.state = "ACTIVE"
-                    except Exception:
-                        pass
-
-                persist()
-                clear_pending()
-                st.success(f"Grid quittiert. Änderungen: {changed_total}.")
-                st.rerun()
-
-            if c2.button("↩️ Abbrechen", key="cancel_grid"):
-                clear_pending()
-                st.rerun()
-            c3.caption("DONE entfernen ist sofort (für Korrekturen).")
-
-
-# =========================
-# Burndown helpers (existing ctx expects these)
-# =========================
-def avg_last_window(values: list[int], end_idx: int, window: int) -> float:
-    if not values:
-        return 0.0
-    end_idx = max(0, min(end_idx, len(values) - 1))
-    window = max(1, int(window))
-    start = max(0, end_idx - window + 1)
-    chunk = values[start : end_idx + 1]
-    return float(sum(chunk)) / float(len(chunk)) if chunk else 0.0
-
-
-def rolling_sum(values: list[int], window: int) -> list[int]:
-    window = max(1, int(window))
-    out: list[int] = []
-    s = 0
-    q = deque()
-    for v in values:
-        q.append(v)
-        s += v
-        if len(q) > window:
-            s -= q.popleft()
-        out.append(int(s))
-    return out
-
-
-def compute_done_composition(task_series: list[TaskSeries]):
-    tasks = [s for s in task_series if is_task(s)]
-    if not tasks:
-        return [], [], [], []
-
-    min_day = min(s.start for s in tasks)
-    max_day = max(s.end for s in tasks)
-
-    all_days: list[date] = []
-    d = min_day
-    while d <= max_day:
-        all_days.append(d)
-        d += timedelta(days=1)
-
-    done_port: list[int] = []
-    remaining_port: list[int] = []
-    comp_by_day: list[list[dict]] = []
-
-    for day in all_days:
-        done_today = 0
-        rem = 0
-        comp: list[dict] = []
-        for s in tasks:
-            tdays = total_days(s)
-            if day < s.start:
-                rem += tdays
-                continue
-            if day > s.end:
-                rem += 0
-                continue
-
-            done_upto = sum(1 for x in getattr(s, "done_days", set()) if s.start <= x <= day)
-            rem += max(0, tdays - done_upto)
-
-            if day in getattr(s, "done_days", set()):
-                done_today += 1
-                comp.append({"series_id": s.series_id, "owner": s.owner, "project": s.project, "task": s.title})
-
-        done_port.append(done_today)
-        remaining_port.append(rem)
-        comp_by_day.append(comp)
-
-    return all_days, done_port, remaining_port, comp_by_day
-
-
-def forecast_eta(all_days: list[date], done_port: list[int], remaining_port: list[int], today_: date, window: int):
-    if not all_days:
-        return None, None, None
-
-    last_le_today = 0
-    last_done = None
-    for i, dd in enumerate(all_days):
-        if dd <= today_:
-            last_le_today = i
-            if done_port[i] > 0:
-                last_done = i
-        else:
-            break
-
-    anchor_idx = last_done if last_done is not None else last_le_today
-    anchor_day = all_days[anchor_idx]
-    rem_anchor = remaining_port[anchor_idx]
-    vel = avg_last_window(done_port, anchor_idx, int(window))
-
-    if vel <= 0 and window < 14:
-        vel = avg_last_window(done_port, anchor_idx, 14)
-
-    if rem_anchor <= 0:
-        return anchor_day, 0.0, anchor_day
-    if vel <= 0:
-        return anchor_day, 0.0, None
-
-    days_needed = int(math.ceil(rem_anchor / vel))
-    eta = anchor_day + timedelta(days=days_needed)
-    return anchor_day, vel, eta
-
-
-def plot_burndown_matplotlib(days: list[date], remaining: list[int], title: str, xlim=None):
-    fig, ax = plt.subplots(figsize=(12, 4.2))
-    ax.plot(days, remaining, marker="o", linestyle="-")
-    ax.set_title(title)
-    ax.set_ylabel("Remaining done-days")
-    ax.set_xlabel("Date")
-    ax.set_ylim(bottom=0)
-    ax.grid(True, linestyle="--", linewidth=0.5)
-    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
-    if xlim is not None:
-        ax.set_xlim(xlim[0], xlim[1])
-    fig.autofmt_xdate()
-    return fig
-
-
-def plot_velocity_plotly(all_days: list[date], vel7: list[int], comp_by_day: list[list[dict]]):
-    hover = []
-    for i, d in enumerate(all_days):
-        items = comp_by_day[i]
-        if not items:
-            hover.append(f"{d.isoformat()}<br><b>0</b> done-days")
-            continue
-        lines = []
-        for it in items[:12]:
-            lines.append(f"- {it['owner']} · {it['project']} · {it['task']}")
-        if len(items) > 12:
-            lines.append(f"... +{len(items)-12} more")
-        hover.append(
-            f"{d.isoformat()}<br><b>{vel7[i]}</b> (7d rolling)<br>"
-            f"Done on day:<br>" + "<br>".join(lines)
-        )
-
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=all_days,
-            y=vel7,
-            mode="lines+markers",
-            name="Velocity (7d rolling)",
-            hovertext=hover,
-            hoverinfo="text",
-        )
+def request_done_single(series_id: str, day: date, reason: str = "") -> None:
+    # Store a simple request in session_state; ui_detail/home can confirm
+    st.session_state.done_requests = st.session_state.get("done_requests", [])
+    st.session_state.done_requests.append(
+        {"series_id": series_id, "day_iso": day.isoformat(), "reason": reason or ""}
     )
-    fig.update_layout(
-        title="Velocity (7-day rolling done-days)",
-        xaxis_title="Date",
-        yaxis_title="Done-days (rolling 7d sum)",
-        hovermode="closest",
-        margin=dict(l=40, r=20, t=55, b=40),
-        height=360,
-    )
-    return fig
 
 
-# =========================
-# Help integration (context mapping)
-# =========================
-PAGE_TO_HELP = {
-    "HOME": "home",
-    "INBOX": "inbox",
-    "TODAY": "today",
-    "DETAIL": "detail",
-    "KANBAN": "kanban",
-    "GANTT": "gantt",
-    "BURNDOWN": "burndown",
-    "DASHBOARD": "dashboard",
-    "META": "meta",
-    "ADMIN": "admin",
-    "DATA": "data",
-    # help pages map to themselves
-    "HELP": "wozu",
-    "BEGINNER": "wozu",
-}
+def request_done_grid(items: list[dict[str, str]], reason: str = "") -> None:
+    st.session_state.done_requests = st.session_state.get("done_requests", [])
+    for it in items:
+        st.session_state.done_requests.append({"series_id": it["series_id"], "day_iso": it["day_iso"], "reason": reason})
 
 
-def open_help(mode: str) -> None:
-    # mode: "full" | "beginner"
-    cur_page = st.session_state.page
-    st.session_state.help_target = PAGE_TO_HELP.get(cur_page, "wozu")
-    st.session_state.help_mode = "beginner" if mode == "beginner" else "full"
-    st.session_state.page_prev = st.session_state.page
-    st.session_state.page = "HELP"
-    st.session_state.nav_force_sync = True  # <<< wichtig
-    st.rerun()
+def handle_done_requests() -> None:
+    reqs = st.session_state.get("done_requests", [])
+    if not reqs:
+        return
+    with st.sidebar.expander("✅ Quittierung nötig", expanded=True):
+        st.caption("Es gibt DONE-Anfragen, die bestätigt werden müssen.")
+        keep = []
+        for i, r in enumerate(reqs):
+            sid = r.get("series_id", "")
+            day_iso = r.get("day_iso", "")
+            reason = r.get("reason", "")
+            try:
+                s = find_series(sid)
+            except Exception:
+                continue
+            row = st.columns([5, 2, 2])
+            row[0].write(f"**{s.title}** · {day_iso}")
+            if reason:
+                row[0].caption(reason)
+            if row[1].button("Quittieren", key=f"done_ok_{i}_{sid}_{day_iso}"):
+                mark_done(s, date.fromisoformat(day_iso))
+                persist()
+            elif row[2].button("Ablehnen", key=f"done_no_{i}_{sid}_{day_iso}"):
+                # simply drop
+                pass
+            else:
+                keep.append(r)
+        st.session_state.done_requests = keep
 
 
-# =========================
-# Sidebar (wie vorher) + Help Icons
-# =========================
-st.sidebar.markdown("### OMG Coop")
+# ------------------ Streamlit setup ------------------
 
-st.sidebar.toggle(
-    "Focus mode (only active tasks, no META, no appointments)",
-    value=st.session_state.focus_mode,
-    key="focus_mode",
+st.set_page_config(page_title=APP_TITLE, layout="wide")
+
+if "initialized" not in st.session_state:
+    st.session_state.initialized = True
+    st.session_state.page = "HOME"
+    st.session_state.page_prev = "HOME"
+    st.session_state.open_series = None
+    st.session_state.focus_mode = False
+    st.session_state.nav_force_sync = True
+    st.session_state.nav_select_before_detail = None
+
+    st.session_state.series = load_state(STATE_PATH)
+    st.session_state.employees = load_employees()
+    st.session_state.lists = load_lists()
+
+    sync_lists_from_data()
+
+today = date.today()
+
+# ------------------ Sidebar (header + quick stats) ------------------
+
+st.sidebar.title(APP_TITLE)
+
+# focus mode toggle
+st.session_state.focus_mode = st.sidebar.toggle(
+    "Focus mode (only active tasks,\nno META, no appointments)",
+    value=bool(st.session_state.get("focus_mode", False)),
+    key="focus_mode_toggle",
 )
 
+# compute sidebar KPIs (simple)
+v = visible_series()
+k_today = sum(1 for s in v if is_task(s) and s.start <= today <= s.end and not is_completed(s, today))
+k_overdue = sum(1 for s in v if is_task(s) and is_overdue(s, today) and not is_completed(s, today))
+k_active = sum(1 for s in v if is_task(s) and is_active(s) and not is_completed(s, today))
+k_meta = sum(1 for s in v if getattr(s, "is_meta", False))
 
-def series_counts(series_list: list[TaskSeries]):
-    tasks = [s for s in series_list if is_task(s)]
-    due_today = [
-        s
-        for s in tasks
-        if is_active(s, today)
-        and (today not in getattr(s, "done_days", set()))
-        and (not is_completed(s, today))
-        and (getattr(s, "state", "") not in ("CANCELLED",))
-    ]
-    overdue = [s for s in tasks if is_overdue(s, today)]
-    active = [s for s in tasks if not is_completed(s, today)]
-    meta_open = [s for s in tasks if bool(getattr(s, "is_meta", False)) and not is_completed(s, today)]
-    return len(due_today), len(overdue), len(active), len(meta_open)
+c1, c2, c3, c4 = st.sidebar.columns(4)
+c1.metric("Today", k_today)
+c2.metric("Overdue", k_overdue)
+c3.metric("Active", k_active)
+c4.metric("Meta", k_meta)
 
+# done requests (quittierung)
+handle_done_requests()
 
-visible = visible_series()
-due_n, overdue_n, active_n, meta_n = series_counts(visible)
+# help buttons (kept, but compact)
+with st.sidebar.expander("Hilfe", expanded=False):
+    st.button("❓ Hilfe", key="help_btn")
+    st.button("🧙 Anfänger", key="beginner_btn")
+    st.caption("Hilfe ist kontextsensitiv: öffnet automatisch\nden passenden Abschnitt zur aktuellen\nSeite.")
 
-k1, k2, k3, k4 = st.sidebar.columns(4)
-k1.markdown(f"<div class='kpi'>{due_n}</div><div class='kpi-label'>Today</div>", unsafe_allow_html=True)
-k2.markdown(f"<div class='kpi'>{overdue_n}</div><div class='kpi-label'>Overdue</div>", unsafe_allow_html=True)
-k3.markdown(f"<div class='kpi'>{active_n}</div><div class='kpi-label'>Active</div>", unsafe_allow_html=True)
-k4.markdown(f"<div class='kpi'>{meta_n}</div><div class='kpi-label'>Meta</div>", unsafe_allow_html=True)
+# ------------------ Navigation ------------------
 
-st.sidebar.markdown("---")
-
-# Help icons: always available + context-sensitive
-hc1, hc2 = st.sidebar.columns(2)
-if hc1.button("❓ Hilfe", key="btn_help_full", use_container_width=True):
-    open_help("full")
-if hc2.button("🧑‍🎓 Anfänger", key="btn_help_beginner", use_container_width=True):
-    open_help("beginner")
-
-st.sidebar.caption("Hilfe ist kontextsensitiv: öffnet automatisch den passenden Abschnitt zur aktuellen Seite.")
-st.sidebar.markdown("---")
-
-
-# =========================
-# Navigation (letzter Eintrag = Gesamte Anleitung)
-# FIX: Dropdown darf nicht auf Home zurückspringen.
-# =========================
+# Define navigation sections
 NAV_SECTIONS = [
     ("Start", [("Home", "HOME")]),
-    # DETAIL ist kein eigener Menüpunkt (sonst springt Navigation bei Open/Back gerne falsch).
-    ("Dateneingabe", [("Inbox", "INBOX"), ("Today", "TODAY"), ("Employees", "EMPLOYEES")]),
-    ("Reporting", [("Kanban", "KANBAN"), ("Dashboard", "DASHBOARD"), ("Burndown", "BURNDOWN"), ("Gantt", "GANTT"), ("Meta", "META")]),
-    ("Wartung", [("Admin", "ADMIN"), ("Data", "DATA")]),
-    ("Hilfe", [("Anfänger (15 Min)", "BEGINNER"), ("Gesamte Anleitung", "HELP")]),
+    ("Work", [("Kanban", "KANBAN"), ("Gantt", "GANTT"), ("Burndown", "BURNDOWN"), ("Dashboard", "DASHBOARD")]),
+    ("People", [("Employees", "EMPLOYEES")]),
+    ("Admin", [("Data", "DATA"), ("Admin", "ADMIN")]),
 ]
 
+# in simplified mode we can render only a subset via another UI module, but keep structure here.
+display_options: list[str] = []
 display_to_code: dict[str, str] = {}
 code_to_display: dict[str, str] = {}
-display_options: list[str] = []
 
 for sec, items in NAV_SECTIONS:
     for label, code in items:
@@ -949,18 +399,18 @@ else:
 
 # Nur bei programmatischen Page-Wechseln: nav_select auf aktuelle Page setzen
 # Achtung: im DETAIL-Modus setzen wir nav_select NICHT auf HOME.
+
+# selectbox rendern (WICHTIG: kein index/value, nur session_state steuert den Default)
+if "nav_select" not in st.session_state:
+    st.session_state["nav_select"] = cur_disp
+
 if st.session_state.nav_force_sync:
     st.session_state["nav_select"] = cur_disp
     st.session_state.nav_force_sync = False
 
-# selectbox rendern
-current_sel = st.session_state.get("nav_select", cur_disp)
-current_idx = display_options.index(current_sel) if current_sel in display_options else 0
-
 picked_disp = st.sidebar.selectbox(
     label="Navigation",
     options=display_options,
-    index=current_idx,
     label_visibility="collapsed",
     key="nav_select",
 )
@@ -980,242 +430,136 @@ if st.session_state.page == "DETAIL":
 if picked_page != st.session_state.page:
     st.session_state.page_prev = st.session_state.page
     st.session_state.page = picked_page
-    # Beim Verlassen von DETAIL: Marker löschen
+    st.session_state.nav_force_sync = False
+    # If leaving detail by nav, close detail state
     if picked_page != "DETAIL":
-        st.session_state.pop("nav_select_before_detail", None)
-    # absichtlich KEIN nav_force_sync hier – sonst überschreiben wir den User-Klick
+        st.session_state.open_series = None
+    st.rerun()
 
-
-# Quick add (task) – wie vorher
+# quick add (kept)
 with st.sidebar.expander("Quick add (task)", expanded=False):
-    q_title = st.text_input("Title", key="qa_title")
-
-    q_portfolio = pick_from_list(
+    qa_title = st.text_input("Title", key="qa_title")
+    qa_owner = st.selectbox(
+        "Owner",
+        options=[e.get("display_name", "") for e in st.session_state.employees if e.get("display_name")],
+        index=0 if st.session_state.employees else 0,
+        key="qa_owner",
+    )
+    qa_owner_id = ""
+    for e in st.session_state.employees:
+        if e.get("display_name") == qa_owner:
+            qa_owner_id = e.get("id", "")
+            break
+    qa_project = pick_from_list(
+        "Project", key="qa_project", values=st.session_state.lists.get("projects", []), current="", require=True, list_key="projects"
+    )
+    qa_theme = pick_from_list(
+        "Theme", key="qa_theme", values=st.session_state.lists.get("themes", []), current="General", require=True, list_key="themes"
+    )
+    qa_portfolio = pick_from_list(
         "Portfolio",
-        key="qa_portfolio_pick",
+        key="qa_portfolio",
         values=st.session_state.lists.get("portfolios", []),
         current="Default",
         require=True,
         list_key="portfolios",
     )
-    q_project = pick_from_list(
-        "Project",
-        key="qa_project_pick",
-        values=st.session_state.lists.get("projects", []),
-        current="",
-        require=True,
-        list_key="projects",
-    )
-    q_theme = pick_from_list(
-        "Theme",
-        key="qa_theme_pick",
-        values=st.session_state.lists.get("themes", []),
-        current="General",
-        require=True,
-        list_key="themes",
-    )
-
-    q_owner_id, q_owner_display = pick_owner(
-        "Owner",
-        key="qa_owner_pick",
-        current_owner_id="",
-        current_owner_display="",
-        employees=st.session_state.employees,
-    )
-
-    q_state = st.selectbox("State", options=TASK_STATES, index=1, key="qa_state")  # ACTIVE default
-    q_meta = st.checkbox("META", value=False, key="qa_meta", disabled=st.session_state.focus_mode)
-
-    c1, c2 = st.columns(2)
-    q_start = c1.date_input("Start", today, key="qa_start")
-    q_end = c2.date_input("End", today, key="qa_end")
-
-    if st.button("Create", key="qa_create"):
-        if not (q_title or "").strip():
-            st.warning("Title is required.")
-        elif not (q_portfolio or "").strip():
-            st.warning("Portfolio is required.")
-        elif not (q_project or "").strip():
-            st.warning("Project is required.")
-        elif not (q_theme or "").strip():
-            st.warning("Theme is required.")
-        elif not (q_owner_display or "").strip():
-            st.warning("Owner is required.")
-        elif q_start > q_end:
-            st.warning("Start must be <= End.")
-        else:
-            is_meta_val = False if st.session_state.focus_mode else bool(q_meta)
+    qa_days = st.number_input("Duration (days)", min_value=1, max_value=30, value=5, step=1, key="qa_days")
+    qa_weight = st.number_input("Weight/Units", min_value=0.0, max_value=1000.0, value=1.0, step=1.0, key="qa_weight")
+    if st.button("Add", key="qa_add"):
+        if qa_title.strip():
             s = new_series(
-                title=q_title,
-                project=q_project,
-                theme=q_theme,
-                owner=q_owner_display,
-                owner_id=q_owner_id,
-                start=q_start,
-                end=q_end,
-                is_meta=is_meta_val,
+                title=qa_title.strip(),
+                portfolio=qa_portfolio,
+                project=qa_project,
+                theme=qa_theme,
+                owner=qa_owner,
+                owner_id=qa_owner_id,
+                start=today,
+                end=today + timedelta(days=int(qa_days) - 1),
+                is_meta=False,
                 kind="task",
-                portfolio=q_portfolio,
-                state=q_state,
+                state="ACTIVE",
             )
+            try:
+                s.weight = float(qa_weight)
+            except Exception:
+                pass
             st.session_state.series.append(s)
             persist()
             sync_lists_from_data()
-            st.success("Created.")
+            st.success("Added.")
+            st.session_state.qa_title = ""
+            st.session_state.nav_force_sync = True
             st.rerun()
+        else:
+            st.warning("Title required.")
 
-# Banner (Quittierung)
-render_pending_banner()
+# ------------------ Page render context ------------------
 
-
-# =========================
-# Context for pages
-# =========================
 ctx = {
     "today": today,
-    "ADD_NEW": ADD_NEW,
-    "TASK_STATES": TASK_STATES,
-    "DATA_FILE": DATA_FILE,
-    "EMP_FILE": EMP_FILE,
-    "LISTS_FILE": LISTS_FILE,
-    "safe_container": safe_container,
-    "segmented": segmented,
-    "appointment_label": appointment_label,
+    "persist": persist,
+    "sync_lists_from_data": sync_lists_from_data,
     "visible_series": visible_series,
     "find_series": find_series,
     "open_detail": open_detail,
     "close_detail": close_detail,
     "delete_series": delete_series,
+    "new_series": new_series,
+    "new_part": new_part,
+    "is_task": is_task,
+    "is_appointment": is_appointment,
+    "is_completed": is_completed,
+    "is_overdue": is_overdue,
+    "is_active": is_active,
+    "progress_percent": progress_percent,
+    "gantt_items": gantt_items,
+    "would_create_cycle": would_create_cycle,
+    "can_depend_series": can_depend_series,
+    "total_days": total_days,
+    "bulk_set_done": bulk_set_done,
+    "mark_done": mark_done,
+    "unmark_done": unmark_done,
+    "appointment_label": appointment_label,
     "pick_from_list": pick_from_list,
-    "pick_owner": pick_owner,
-    "persist": persist,
-    "sync_lists_from_data": sync_lists_from_data,
     "request_done_single": request_done_single,
     "request_done_grid": request_done_grid,
     "employees": st.session_state.employees,
-    "save_employees": save_employees,
-    "resolve_owner_id": resolve_owner_id,
-    "display_name_for_owner_id": display_name_for_owner_id,
     "lists": st.session_state.lists,
-    "save_lists": save_lists,
-    # help
-    "help_mode": st.session_state.help_mode,
-    "help_target": st.session_state.help_target,
-    # core
-    "TaskPart": TaskPart,
-    "TaskSeries": TaskSeries,
-    "new_series": new_series,
-    "new_part": new_part,
-    "mark_done": mark_done,
-    "unmark_done": unmark_done,
-    "bulk_set_done": bulk_set_done,
-    "progress_percent": progress_percent,
-    "total_days": total_days,
-    "is_task": is_task,
-    "is_appointment": is_appointment,
-    "is_active": is_active,
-    "is_completed": is_completed,
-    "is_overdue": is_overdue,
-    "can_depend_series": can_depend_series,
-    "would_create_cycle": would_create_cycle,
-    "gantt_items": gantt_items,
-    "critical_path_series": critical_path_series,
-    # reporting
-    "compute_done_composition": compute_done_composition,
-    "forecast_eta": forecast_eta,
-    # units-based reporting (self-explaining)
-    "compute_units_composition": compute_units_composition,
-    "forecast_eta_units": forecast_eta_units,
-    "series_total_units": series_total_units,
-    "plot_burndown_matplotlib": plot_burndown_matplotlib,
-    "plot_velocity_plotly": plot_velocity_plotly,
-    "rolling_sum": rolling_sum,
-    # capacity
     "capacity_summary": capacity_summary,
-    "week_window": week_window,
+    "compute_units_composition": compute_units_composition,
+    "build_burndown_series": build_burndown_series,
+    "calc_velocity": calc_velocity,
+    "forecast_finish_date": forecast_finish_date,
 }
 
-page = st.session_state.page
+# ------------------ Main render ------------------
 
-
-# =========================
-# Routing
-# =========================
-if page == "HOME":
-    from ui_home import render
-
-    render(ctx)
-
-elif page == "INBOX":
-    from ui_inbox import render
-
-    render(ctx)
-
-elif page == "KANBAN":
-    from ui_kanban import render
-
-    render(ctx)
-
-elif page == "TODAY":
-    from ui_today import render
-
-    render(ctx)
-
-elif page == "EMPLOYEES":
-    from ui_employees import render
-
-    render(ctx)
-
-elif page == "DASHBOARD":
-    from ui_dashboard import render
-
-    render(ctx)
-
-elif page == "BURNDOWN":
-    from ui_burndown import render
-
-    render(ctx)
-
-elif page == "GANTT":
-    from ui_gantt import render
-
-    render(ctx)
-
-elif page == "META":
-    from ui_meta import render
-
-    render(ctx)
-
-elif page == "ADMIN":
-    from ui_admin import render
-
-    render(ctx)
-
-elif page == "DATA":
-    from ui_data import render
-
-    render(ctx)
-
-elif page == "DETAIL":
-    from ui_detail import render
-
-    render(ctx)
-
-elif page == "BEGINNER":
-    # same help page, just set mode and render
-    st.session_state.help_mode = "beginner"
-    st.session_state.help_target = PAGE_TO_HELP.get(st.session_state.page_prev, "wozu")
-    st.session_state.nav_force_sync = True  # <<< wichtig
-    from ui_help import render
-
-    render(ctx)
-
-elif page == "HELP":
-    from ui_help import render
-
-    render(ctx)
-
+if st.session_state.page == "DETAIL":
+    # detail view requires open_series
+    if not st.session_state.open_series:
+        st.warning("No item selected.")
+        st.session_state.page = "HOME"
+        st.session_state.nav_force_sync = True
+        st.rerun()
+    else:
+        render_detail(ctx)
+elif st.session_state.page == "HOME":
+    render_home(ctx)
+elif st.session_state.page == "KANBAN":
+    render_kanban(ctx)
+elif st.session_state.page == "GANTT":
+    render_gantt(ctx)
+elif st.session_state.page == "BURNDOWN":
+    render_burndown(ctx)
+elif st.session_state.page == "DASHBOARD":
+    render_dashboard(ctx)
+elif st.session_state.page == "EMPLOYEES":
+    render_employees(ctx)
+elif st.session_state.page == "DATA":
+    render_data(ctx)
+elif st.session_state.page == "ADMIN":
+    render_admin(ctx)
 else:
-    st.session_state.page = "HOME"
-    st.session_state.nav_force_sync = True  # <<< wichtig
-    st.rerun()
+    render_home(ctx)
