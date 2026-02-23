@@ -152,13 +152,11 @@ def render(ctx: dict) -> None:
                     sync_lists_from_data()
 
                 state_key = f"kb_state_{sid}"
-                # initialize selectbox state
-                if state_key not in st.session_state:
-                    st.session_state[state_key] = stt
-
+                idx = KANBAN_STATES.index(stt) if stt in KANBAN_STATES else 0
                 c_state.selectbox(
                     label="",
                     options=KANBAN_STATES,
+                    index=idx,
                     key=state_key,
                     label_visibility="collapsed",
                     on_change=_set_state,

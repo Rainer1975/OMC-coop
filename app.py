@@ -18,11 +18,12 @@ from core import (
     TaskSeries,
     bulk_set_done,
     can_depend_series,
-    capacity_summary,
+    capacity_summary as core_capacity_summary,
     compute_units_composition,
     build_burndown_series,
     calc_velocity,
     forecast_finish_date,
+    forecast_eta_units,
     gantt_items,
     is_active,
     is_appointment,
@@ -310,6 +311,155 @@ def pick_owner(
     return cur_id, picked_name
 
 
+
+def resolve_owner_id(owner_display: str, employees: List[Dict[str, Any]]) -> str:
+    owner_display = str(owner_display or "").strip()
+    if not owner_display:
+        return ""
+    for e in employees or []:
+        if str(e.get("display_name") or "").strip() == owner_display:
+            return str(e.get("id") or "").strip()
+    return ""
+
+
+def save_series(series_list: List[TaskSeries]) -> None:
+    # wrapper used by ui_admin.py
+    save_state(STATE_PATH, series_list)
+
+
+def safe_container(*, border: bool = True):
+    """Streamlit container wrapper that stays compatible across versions."""
+    try:
+        return st.container(border=border)
+    except TypeError:
+        return st.container()
+
+
+def segmented(label: str, options: List[str], default: str):
+    """Simple segmented control fallback (Streamlit versions differ)."""
+    options = list(options or [])
+    if not options:
+        return default
+    default = default if default in options else options[0]
+
+    for attr in ("segmented_control", "segmented"):
+        fn = getattr(st, attr, None)
+        if callable(fn):
+            try:
+                return fn(label, options, default=default)
+            except TypeError:
+                try:
+                    return fn(label, options, default)
+                except Exception:
+                    pass
+
+    idx = options.index(default) if default in options else 0
+    try:
+        return st.radio(label, options, index=idx, horizontal=True)
+    except TypeError:
+        return st.radio(label, options, index=idx)
+
+
+def week_window(today: date) -> Tuple[date, date]:
+    ws = today - timedelta(days=today.weekday())
+    we = ws + timedelta(days=6)
+    return ws, we
+
+
+def _business_days(ws: date, we: date) -> int:
+    d = ws
+    n = 0
+    while d <= we:
+        if d.weekday() < 5:
+            n += 1
+        d += timedelta(days=1)
+    return n
+
+
+def capacity_summary(tasks_all: List[TaskSeries], employees: List[Dict[str, Any]], today: date, ws: date, we: date) -> List[Dict[str, Any]]:
+    """UI-friendly wrapper (used by ui_dashboard.py)."""
+    CAP_PER_DAY = 5.0
+
+    emp_rows: Dict[str, Dict[str, Any]] = {}
+    for e in employees or []:
+        eid = str(e.get("id") or "").strip()
+        dn = str(e.get("display_name") or "").strip()
+        if not eid or not dn:
+            continue
+        emp_rows[eid] = {"owner": dn, "owner_id": eid, "planned": 0.0, "done": 0.0, "overdue": 0}
+
+    emp_rows.setdefault("", {"owner": "Unassigned", "owner_id": "", "planned": 0.0, "done": 0.0, "overdue": 0})
+
+    def units(s: TaskSeries) -> float:
+        try:
+            w = float(getattr(s, "weight", 0.0) or 0.0)
+            return w if w > 0 else 1.0
+        except Exception:
+            return 1.0
+
+    for s in tasks_all or []:
+        if not is_task(s):
+            continue
+        if getattr(s, "end") < ws or getattr(s, "start") > we:
+            continue
+
+        eid = str(getattr(s, "owner_id", "") or "").strip()
+        row = emp_rows.get(eid) or emp_rows[""]
+        u = units(s)
+
+        if not is_completed(s, today):
+            row["planned"] += u
+
+        dd = getattr(s, "done_days", set()) or set()
+        if isinstance(dd, set) and dd:
+            sd = max(getattr(s, "start"), ws)
+            ed = min(getattr(s, "end"), we)
+
+            full_bd = max(1, _business_days(getattr(s, "start"), getattr(s, "end")))
+            per_day = u / float(full_bd)
+
+            d = sd
+            while d <= ed:
+                if d.weekday() < 5 and d in dd:
+                    row["done"] += per_day
+                d += timedelta(days=1)
+
+        if is_overdue(s, today):
+            row["overdue"] += 1
+
+    cap_days = max(1, _business_days(ws, we))
+    cap_val = float(cap_days) * CAP_PER_DAY
+
+    out = []
+    for _eid, row in emp_rows.items():
+        planned = float(row["planned"])
+        done = float(row["done"])
+        remaining = max(0.0, planned - done)
+        util = planned / cap_val if cap_val > 0 else 0.0
+        out.append(
+            {
+                "owner": row["owner"],
+                "owner_id": row["owner_id"],
+                "planned": planned,
+                "done": done,
+                "remaining": remaining,
+                "overdue": int(row["overdue"]),
+                "capacity": cap_val,
+                "util": util,
+            }
+        )
+
+    out.sort(key=lambda r: (r["owner"] == "Unassigned", -float(r.get("util", 0.0))))
+    return out
+
+
+def compute_done_composition(tasks: List[TaskSeries]):
+    return compute_units_composition(tasks)
+
+
+def forecast_eta(all_days, done_per_day, remaining_per_day, today: date, window_business_days: int = 10):
+    return forecast_eta_units(all_days, done_per_day, remaining_per_day, today, window_business_days)
+
 def request_done_single(series_id: str, day: date, reason: str = "") -> None:
     st.session_state.done_requests = st.session_state.get("done_requests", [])
     st.session_state.done_requests.append({"series_id": series_id, "day_iso": day.isoformat(), "reason": reason or ""})
@@ -559,7 +709,19 @@ ctx = {
     "forecast_finish_date": forecast_finish_date,
 
     # REQUIRED by ui_data.py
-    "DATA_FILE": str(STATE_PATH),
+    
+"series": st.session_state.series,
+"save_series": save_series,
+"save_employees": save_employees,
+"save_lists": save_lists,
+"resolve_owner_id": resolve_owner_id,
+"safe_container": safe_container,
+"segmented": segmented,
+"compute_done_composition": compute_done_composition,
+"forecast_eta": forecast_eta,
+"week_window": week_window,
+"forecast_eta_units": forecast_eta_units,
+"DATA_FILE": str(STATE_PATH),
     "EMP_FILE": str(EMP_PATH),
     "LISTS_FILE": str(LISTS_PATH),
 }
