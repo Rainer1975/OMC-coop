@@ -513,8 +513,17 @@ def pick_from_list(
     idx = options.index(cur) if cur in options else 0
 
     pick = st.selectbox(label, options=options, index=idx, key=key)
+
+    # ✅ FORM-SAFE: Eingabefeld immer sichtbar (sonst erscheint es in Forms nie rechtzeitig)
+    new_key = f"{key}__new"
+    new_val = st.text_input(
+        f"{label} (new – nur wenn 'Add new...' gewählt)",
+        value=st.session_state.get(new_key, ""),
+        key=new_key,
+        placeholder=f"Neuen Wert für {label} eingeben …",
+    ).strip()
+
     if pick == ADD_NEW:
-        new_val = st.text_input(f"{label} (new)", value="", key=f"{key}__new").strip()
         if not new_val:
             return "" if require else ""
         new_val = re.sub(r"\s+", " ", new_val)
@@ -527,6 +536,7 @@ def pick_from_list(
                     st.session_state.lists.get("themes", []),
                 )
         return new_val
+
     return pick
 
 
