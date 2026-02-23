@@ -5,7 +5,7 @@ import json
 import re
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
@@ -248,6 +248,68 @@ def pick_from_list(
     return pick
 
 
+def pick_owner(
+    label: str,
+    key: str,
+    current_owner_id: str,
+    current_owner_display: str,
+    employees: List[Dict[str, Any]],
+) -> Tuple[str, str]:
+    """
+    Stable Owner picker used by ui_detail.py.
+    Returns: (owner_id, owner_display_name)
+    """
+    cur_id = str(current_owner_id or "").strip()
+    cur_name = str(current_owner_display or "").strip()
+
+    # build options
+    # map display_name -> id (if duplicates: first wins, but we also handle by id fallback)
+    opts: List[Tuple[str, str]] = []
+    for e in employees or []:
+        eid = str(e.get("id") or "").strip()
+        dn = str(e.get("display_name") or "").strip()
+        if not eid or not dn:
+            continue
+        opts.append((dn, eid))
+
+    # keep unique by (dn,eid)
+    seen = set()
+    uniq: List[Tuple[str, str]] = []
+    for dn, eid in opts:
+        k = (dn, eid)
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append((dn, eid))
+    opts = uniq
+
+    # if current not in list, add it so UI stays stable
+    if cur_id and cur_name:
+        if (cur_name, cur_id) not in opts:
+            opts = [(cur_name, cur_id)] + opts
+
+    # always allow "no owner"
+    display_options = ["—"] + [dn for dn, _eid in opts]
+    # choose index based on current name if possible
+    if cur_name and cur_name in display_options:
+        idx = display_options.index(cur_name)
+    else:
+        idx = 0
+
+    picked_name = st.selectbox(label, options=display_options, index=idx, key=key)
+
+    if picked_name == "—":
+        return "", ""
+
+    # resolve picked name back to id (first match)
+    for dn, eid in opts:
+        if dn == picked_name:
+            return eid, dn
+
+    # fallback
+    return cur_id, picked_name
+
+
 def request_done_single(series_id: str, day: date, reason: str = "") -> None:
     st.session_state.done_requests = st.session_state.get("done_requests", [])
     st.session_state.done_requests.append({"series_id": series_id, "day_iso": day.isoformat(), "reason": reason or ""})
@@ -400,21 +462,30 @@ if picked_page != st.session_state.page:
 with st.sidebar.expander("Quick add (task)", expanded=False):
     qa_title = st.text_input("Title", key="qa_title")
 
+    owner_names = [e.get("display_name", "") for e in st.session_state.employees if e.get("display_name")]
     qa_owner = st.selectbox(
         "Owner",
-        options=[e.get("display_name", "") for e in st.session_state.employees if e.get("display_name")],
-        index=0 if st.session_state.employees else 0,
+        options=owner_names if owner_names else ["—"],
+        index=0,
         key="qa_owner",
     )
-    qa_owner_id = ""
-    for e in st.session_state.employees:
-        if e.get("display_name") == qa_owner:
-            qa_owner_id = e.get("id", "")
-            break
 
-    qa_project = pick_from_list("Project", key="qa_project", values=st.session_state.lists.get("projects", []), current="", require=True, list_key="projects")
-    qa_theme = pick_from_list("Theme", key="qa_theme", values=st.session_state.lists.get("themes", []), current="General", require=True, list_key="themes")
-    qa_portfolio = pick_from_list("Portfolio", key="qa_portfolio", values=st.session_state.lists.get("portfolios", []), current="Default", require=True, list_key="portfolios")
+    qa_owner_id = ""
+    if qa_owner != "—":
+        for e in st.session_state.employees:
+            if e.get("display_name") == qa_owner:
+                qa_owner_id = str(e.get("id") or "")
+                break
+
+    qa_project = pick_from_list(
+        "Project", key="qa_project", values=st.session_state.lists.get("projects", []), current="", require=True, list_key="projects"
+    )
+    qa_theme = pick_from_list(
+        "Theme", key="qa_theme", values=st.session_state.lists.get("themes", []), current="General", require=True, list_key="themes"
+    )
+    qa_portfolio = pick_from_list(
+        "Portfolio", key="qa_portfolio", values=st.session_state.lists.get("portfolios", []), current="Default", require=True, list_key="portfolios"
+    )
 
     qa_days = st.number_input("Duration (days)", min_value=1, max_value=30, value=5, step=1, key="qa_days")
     qa_weight = st.number_input("Weight/Units", min_value=0.0, max_value=1000.0, value=1.0, step=1.0, key="qa_weight")
@@ -426,7 +497,7 @@ with st.sidebar.expander("Quick add (task)", expanded=False):
                 portfolio=qa_portfolio,
                 project=qa_project,
                 theme=qa_theme,
-                owner=qa_owner,
+                owner="" if qa_owner == "—" else qa_owner,
                 owner_id=qa_owner_id,
                 start=today,
                 end=today + timedelta(days=int(qa_days) - 1),
@@ -476,6 +547,7 @@ ctx = {
     "unmark_done": unmark_done,
     "appointment_label": appointment_label,
     "pick_from_list": pick_from_list,
+    "pick_owner": pick_owner,  # ✅ FIX: required by ui_detail.py
     "request_done_single": request_done_single,
     "request_done_grid": request_done_grid,
     "employees": st.session_state.employees,
@@ -486,7 +558,7 @@ ctx = {
     "calc_velocity": calc_velocity,
     "forecast_finish_date": forecast_finish_date,
 
-    # ✅ REQUIRED by ui_data.py (fix for KeyError)
+    # REQUIRED by ui_data.py
     "DATA_FILE": str(STATE_PATH),
     "EMP_FILE": str(EMP_PATH),
     "LISTS_FILE": str(LISTS_PATH),
