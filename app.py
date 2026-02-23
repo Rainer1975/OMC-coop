@@ -936,10 +936,19 @@ for sec, items in NAV_SECTIONS:
         display_options.append(disp)
 
 # Zielanzeige aus aktueller Page ableiten
-cur_code = st.session_state.page if st.session_state.page in code_to_display else "HOME"
-cur_disp = code_to_display.get(cur_code, display_options[0])
+# DETAIL ist kein Sidebar-Menüpunkt. Wenn wir im Detail sind, soll die Sidebar optisch
+# beim vorherigen Menüpunkt bleiben (sonst springt sie auf HOME und überschreibt DETAIL).
+if st.session_state.page == "DETAIL":
+    cur_disp = st.session_state.get("nav_select_before_detail") or code_to_display.get(
+        st.session_state.get("page_prev") or "HOME",
+        display_options[0],
+    )
+else:
+    cur_code = st.session_state.page if st.session_state.page in code_to_display else "HOME"
+    cur_disp = code_to_display.get(cur_code, display_options[0])
 
 # Nur bei programmatischen Page-Wechseln: nav_select auf aktuelle Page setzen
+# Achtung: im DETAIL-Modus setzen wir nav_select NICHT auf HOME.
 if st.session_state.nav_force_sync:
     st.session_state["nav_select"] = cur_disp
     st.session_state.nav_force_sync = False
