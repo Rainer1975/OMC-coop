@@ -150,6 +150,18 @@ def render(ctx: dict) -> None:
                     if rows:
                         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
+    st.caption('Open task (klick auf Titel)')
+    q = st.text_input('Filter', placeholder='search title…', key='dash_open_filter')
+    shown = tasks
+    if q:
+        qq = q.lower()
+        shown = [s for s in tasks if qq in ((s.title or '') + ' ' + (s.project or '') + ' ' + (s.owner or '')).lower()]
+    for s in shown[:25]:
+        if st.button(str(s.title or ''), key=f"dash_open_{s.series_id}", use_container_width=True):
+            ctx['open_detail'](s.series_id)
+        st.caption(f"{s.project} · {s.theme} · {s.owner} · {s.start.isoformat()}→{s.end.isoformat()}")
+
+
     # =========================
     # Delivery speed + Runway (units-based)
     # =========================

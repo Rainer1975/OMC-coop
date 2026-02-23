@@ -357,11 +357,11 @@ def render(ctx: dict) -> None:
     with st.expander("📋 Tasks (open detail)", expanded=True):
         for s in sorted(tasks, key=lambda x: (getattr(x, "start", today), getattr(x, "end", today), _norm(getattr(x, "title", "")))):
             c1, c2, c3, c4 = st.columns([5, 2, 2, 3])
-            c1.write(f"**{s.title}**")
+            if c1.button(s.title or "", key=f"emp_title_{s.series_id}"):
+                open_detail(s.series_id)
             c2.write(f"{s.start.isoformat()} → {s.end.isoformat()}")
             c3.write(getattr(s, "state", ""))
-            if c4.button("Open", key=f"emp_open_{s.series_id}"):
-                open_detail(s.series_id)
+            c4.empty()
 
     # Grid editor: choose dates to set done
     st.markdown("**DONE setzen (mehrere Einträge, quittierungspflichtig):**")

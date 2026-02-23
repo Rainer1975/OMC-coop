@@ -150,17 +150,14 @@ def render(ctx) -> None:
         use_container_width=True,
     )
 
-    st.caption("Eintrag öffnen")
+    st.caption("Eintrag öffnen (klick auf Titel)")
     for s in rows[:25]:
-        sid = getattr(s, "series_id", "")
+        sid = getattr(s, 'series_id', '')
         if not sid:
             continue
-        cols = st.columns([6, 1, 3])
-        cols[0].markdown(
-            f"**{getattr(s, 'title', '')}** — {getattr(s, 'project', '')} · {getattr(s, 'owner', '')}"
-        )
-        # on_click -> ctx.open_detail: zuverlässig trotz Sidebar-Navigation
-        cols[1].button("Open", key=f"home_open_{sid}", on_click=ctx.open_detail, args=(sid,))
-        cols[2].caption(f"{getattr(s, 'start', '')} → {getattr(s, 'end', '')}")
+        c1, c2 = st.columns([7, 3], vertical_alignment='center')
+        if c1.button(str(getattr(s, 'title', '') or ''), key=f'home_open_{sid}'):
+            ctx.open_detail(sid)
+        c2.caption(f"{getattr(s, 'start', '')} → {getattr(s, 'end', '')}")
 
 

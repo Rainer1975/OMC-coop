@@ -18,23 +18,16 @@ def render(ctx: dict) -> None:
     is_completed = ctx["is_completed"]
     is_overdue = ctx["is_overdue"]
 
-    st.title("Heute")
+    st.title("Today")
     if st.session_state.get("focus_mode"):
         st.caption("Focus mode: nur aktive Tasks (keine META, keine Termine).")
     else:
         st.caption("Operativ: schnell quittieren, Detail öffnen.")
 
-    # Minimal, oma-taugliche Filter: standardmäßig nur das Nötigste sichtbar.
-    view = "Tasks" if st.session_state.get("focus_mode") else "All"
-    show_meta = False if st.session_state.get("focus_mode") else True
-    q = ""
-
-    with st.expander("Filter (optional)", expanded=False):
-        c1, c2 = st.columns([2, 6])
-        if not st.session_state.get("focus_mode"):
-            view = c1.selectbox("Ansicht", ["All", "Tasks", "Overdue", "Appointments"], index=0, key="today_view_simple")
-            show_meta = c2.toggle("META anzeigen", value=True, key="today_show_meta_simple")
-        q = st.text_input("Suche", placeholder="Titel…", key="today_search_simple")
+    left, mid, right = st.columns([2, 2, 6])
+    view = "Tasks" if st.session_state.get("focus_mode") else segmented("View", ["All", "Tasks", "Overdue", "Appointments"], "All")
+    show_meta = False if st.session_state.get("focus_mode") else mid.toggle("Show META", value=True, key="today_show_meta")
+    q = right.text_input("Search", placeholder="Search title…", label_visibility="collapsed", key="today_search")
 
     def match(s) -> bool:
         if q and q.lower() not in (s.title or "").lower():

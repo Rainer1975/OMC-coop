@@ -20,12 +20,37 @@ def _as_list(x: Any) -> list:
 
 
 def _incoming_dependents(series_id: str) -> list:
-    """Series that depend on this series_id (incoming edges)."""
+    """Series that depend on this series_id (incoming edges).
+
+    Supports legacy fields:
+    - s.predecessors (current)
+    - s.depends_on (legacy)
+    - s.meta['predecessors'] / s.meta['depends_on']
+    """
     out = []
     for s in st.session_state.get("series", []) or []:
-        deps = getattr(s, "depends_on", None)
-        if deps and series_id in _as_list(deps):
-            out.append(s)
+        try:
+            preds = []
+            v = getattr(s, "predecessors", None)
+            if isinstance(v, list):
+                preds.extend([str(x).strip() for x in v if str(x).strip()])
+            v2 = getattr(s, "depends_on", None)
+            if isinstance(v2, list):
+                preds.extend([str(x).strip() for x in v2 if str(x).strip()])
+
+            m = getattr(s, "meta", {}) or {}
+            if isinstance(m, dict):
+                vm = m.get("predecessors", [])
+                if isinstance(vm, list):
+                    preds.extend([str(x).strip() for x in vm if str(x).strip()])
+                vm2 = m.get("depends_on", [])
+                if isinstance(vm2, list):
+                    preds.extend([str(x).strip() for x in vm2 if str(x).strip()])
+
+            if series_id in preds:
+                out.append(s)
+        except Exception:
+            continue
     return out
 
 
@@ -64,7 +89,7 @@ def render(ctx: dict) -> None:
 
     with top_r:
         with st.popover("🗑️ Löschen", use_container_width=True):
-            st.error("Achtung: Löschen entfernt den Task dauerhaft aus data.json.")
+            st.error("Achtung: Löschen entfernt den Eintrag dauerhaft aus data.json.")
             if incoming:
                 st.warning(
                     "Andere Tasks hängen davon ab:\n\n"
@@ -79,7 +104,7 @@ def render(ctx: dict) -> None:
                 fix_refs = True
 
             confirm = st.checkbox(
-                "Ich bestätige: Task wirklich löschen",
+                "Ich bestätige: wirklich löschen",
                 value=False,
                 key=f"detail_del_confirm_{sid}",
             )
@@ -92,13 +117,38 @@ def render(ctx: dict) -> None:
                 # Remove references in other tasks if requested
                 if incoming and fix_refs:
                     for other in incoming:
-                        deps = _as_list(getattr(other, "depends_on", []) or [])
-                        if sid in deps:
-                            deps = [x for x in deps if x != sid]
-                            try:
-                                other.depends_on = deps
-                            except Exception:
-                                pass
+                        # Normalize: remove sid from predecessors/depends_on and meta mirrors
+                        try:
+                            preds = _as_list(getattr(other, "predecessors", []) or [])
+                            if sid in preds:
+                                preds = [x for x in preds if x != sid]
+                                try:
+                                    other.predecessors = preds
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        try:
+                            deps = _as_list(getattr(other, "depends_on", []) or [])
+                            if sid in deps:
+                                deps = [x for x in deps if x != sid]
+                                try:
+                                    other.depends_on = deps
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        try:
+                            m = getattr(other, "meta", {}) or {}
+                            if isinstance(m, dict):
+                                m2 = dict(m)
+                                for k in ("predecessors", "depends_on"):
+                                    vv = m2.get(k, [])
+                                    if isinstance(vv, list) and sid in vv:
+                                        m2[k] = [x for x in vv if x != sid]
+                                other.meta = m2
+                        except Exception:
+                            pass
 
                 ctx["delete_series"](sid)
                 try:
@@ -106,7 +156,6 @@ def render(ctx: dict) -> None:
                 except Exception:
                     pass
                 st.success("Task gelöscht.")
-                ctx["close_detail"]
                 # close_detail reruns; if not available for some reason, do a rerun
                 try:
                     ctx["close_detail"]()

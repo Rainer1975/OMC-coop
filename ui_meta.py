@@ -42,6 +42,15 @@ def render(ctx: dict) -> None:
     df = pd.DataFrame(rows)
     st.dataframe(df.drop(columns=["ID"]), use_container_width=True, hide_index=True)
 
+    st.caption('META öffnen (klick auf Titel)')
+    for r in rows[:25]:
+        sid = r.get('ID')
+        if not sid:
+            continue
+        if st.button(str(r.get('Task') or ''), key=f"meta_title_{sid}", use_container_width=True):
+            open_detail(sid)
+
+
     pick = st.selectbox("Open META task", options=[f"{r['Project']} · {r['Task']}" for r in rows], index=0)
     if st.button("Open selected", key="meta_open"):
         sid = rows[[f"{r['Project']} · {r['Task']}" for r in rows].index(pick)]["ID"]
