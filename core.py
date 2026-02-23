@@ -2,12 +2,10 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Union
+from typing import Any, Dict, List, Optional, Set, Union
 
 
 # =========================
@@ -85,7 +83,7 @@ class TaskSeries:
     start: date
     end: date
 
-    kind: str = "task"          # "task" | "appointment"
+    kind: str = "task"  # "task" | "appointment"
     is_meta: bool = False
 
     portfolio: str = "Default"
@@ -95,9 +93,10 @@ class TaskSeries:
     owner: str = ""
     owner_id: str = ""
 
-    state: str = "ACTIVE"       # PLANNED | ACTIVE | BLOCKED | DONE | CANCELLED
+    state: str = "ACTIVE"  # PLANNED | ACTIVE | BLOCKED | DONE | CANCELLED
 
-    time_start: str = ""        # appointment optional
+    # appointment optional fields
+    time_start: str = ""
     time_end: str = ""
     location: str = ""
 
@@ -202,7 +201,13 @@ def _make_id(prefix: str) -> str:
 # =========================
 # Constructors
 # =========================
-def new_part(label: str, start: date, end: date, weight: float = 100.0, predecessors: Optional[List[str]] = None) -> TaskPart:
+def new_part(
+    label: str,
+    start: date,
+    end: date,
+    weight: float = 100.0,
+    predecessors: Optional[List[str]] = None,
+) -> TaskPart:
     return TaskPart(
         part_id=_make_id("p"),
         label=str(label or ""),
@@ -260,7 +265,6 @@ def is_appointment(s: TaskSeries) -> bool:
 
 
 def is_completed(s: TaskSeries, today: date) -> bool:
-    # completed if today is marked done OR if series.state is DONE (for tasks) and end <= today
     try:
         if today in (getattr(s, "done_days", set()) or set()):
             return True
@@ -293,9 +297,6 @@ def is_overdue(s: TaskSeries, today: date) -> bool:
 def mark_done(s: TaskSeries, d: date) -> None:
     if d is None:
         return
-    if d < getattr(s, "start", d) or d > getattr(s, "end", d):
-        # allow anyway (but usually shouldn't happen)
-        pass
     if not isinstance(getattr(s, "done_days", None), set):
         try:
             s.done_days = set()
@@ -313,11 +314,8 @@ def unmark_done(s: TaskSeries, d: date) -> None:
 
 
 def bulk_set_done(series_list: List[TaskSeries], items: List[Dict[str, str]]) -> None:
-    """
-    items: [{"series_id": "...", "day_iso": "YYYY-MM-DD"}, ...]
-    """
-    idx = {s.series_id: s for s in series_list}
-    for it in items:
+    idx = {s.series_id: s for s in (series_list or [])}
+    for it in items or []:
         sid = str(it.get("series_id") or "")
         dd = _parse_date(it.get("day_iso"))
         if not sid or not dd:
@@ -343,9 +341,6 @@ def total_days(s: TaskSeries) -> int:
 
 
 def progress_percent(s: TaskSeries, today: date) -> float:
-    """
-    Progress = done days / total days, capped to [0..1]
-    """
     try:
         td = total_days(s)
         if td <= 0:
@@ -353,35 +348,72 @@ def progress_percent(s: TaskSeries, today: date) -> float:
         dd = getattr(s, "done_days", set()) or set()
         if not isinstance(dd, set):
             dd = set()
-        done_in_range = [d for d in dd if getattr(s, "start") <= d <= getattr(s, "end") and d <= today]
+        done_in_range = [
+            d for d in dd if getattr(s, "start") <= d <= getattr(s, "end") and d <= today
+        ]
         return max(0.0, min(1.0, float(len(done_in_range)) / float(td)))
     except Exception:
         return 0.0
+
+
+def remaining_days(s: TaskSeries, today: Optional[date] = None) -> int:
+    """
+    Backward compatible helper (older UI modules import this).
+    Remaining calendar days (inclusive) from max(today,start) until end,
+    subtracting days already marked DONE in that window. Never negative.
+    """
+    if today is None:
+        today = date.today()
+
+    try:
+        start = getattr(s, "start", today)
+        end = getattr(s, "end", today)
+        if not isinstance(start, date) or not isinstance(end, date):
+            return 0
+    except Exception:
+        return 0
+
+    if today > end:
+        return 0
+
+    lo = today if today > start else start
+    hi = end
+    total = (hi - lo).days + 1
+    if total <= 0:
+        return 0
+
+    done = 0
+    try:
+        dd = getattr(s, "done_days", set()) or set()
+        if not isinstance(dd, set):
+            dd = set()
+        for d in dd:
+            if isinstance(d, date) and lo <= d <= hi:
+                done += 1
+    except Exception:
+        done = 0
+
+    return max(0, int(total - done))
 
 
 # =========================
 # Dependencies (series-level)
 # =========================
 def would_create_cycle(series_list: List[TaskSeries], src_series_id: str, dst_series_id: str) -> bool:
-    """
-    If we add an edge src <- dst (dst depends on src), would that create a cycle?
-    """
     if not src_series_id or not dst_series_id:
         return False
     if src_series_id == dst_series_id:
         return True
 
     succ: Dict[str, List[str]] = {}
-    for s in series_list:
+    for s in series_list or []:
         sid = s.series_id
         preds = list(getattr(s, "predecessors", []) or [])
         for p in preds:
             succ.setdefault(p, []).append(sid)
 
-    # add proposed edge
     succ.setdefault(src_series_id, []).append(dst_series_id)
 
-    # detect cycle: dst reaches src
     seen = set()
     q = [dst_series_id]
     while q:
@@ -397,7 +429,6 @@ def would_create_cycle(series_list: List[TaskSeries], src_series_id: str, dst_se
 
 
 def can_depend_series(series_list: List[TaskSeries], src_series_id: str, dst_series_id: str) -> bool:
-    # dst depends on src
     if not src_series_id or not dst_series_id:
         return False
     if src_series_id == dst_series_id:
@@ -410,7 +441,7 @@ def can_depend_series(series_list: List[TaskSeries], src_series_id: str, dst_ser
 # =========================
 def gantt_items(series_list: List[TaskSeries], today: date) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
-    for s in series_list:
+    for s in series_list or []:
         try:
             items.append(
                 {
@@ -480,7 +511,6 @@ def _business_days_between(start: date, end: date) -> int:
 
 
 def _week_window(today: date) -> tuple[date, date]:
-    # Monday..Sunday window
     start = today - timedelta(days=today.weekday())
     end = start + timedelta(days=6)
     return start, end
@@ -488,7 +518,6 @@ def _week_window(today: date) -> tuple[date, date]:
 
 def _month_window(today: date) -> tuple[date, date]:
     start = today.replace(day=1)
-    # next month start
     if start.month == 12:
         nstart = start.replace(year=start.year + 1, month=1, day=1)
     else:
@@ -504,21 +533,12 @@ def capacity_summary(
     window: str = "week",
     default_capacity_per_day: float = 5.0,
 ) -> Dict[str, Any]:
-    """
-    Very pragmatic:
-      - capacity = business_days * capacity_per_day (per employee)
-      - planned = sum units for tasks overlapping window, excluding completed
-      - done = sum units done within window (based on done_days)
-      - remaining = planned - done (>=0)
-      - overdue = count overdue tasks
-    """
     w = (window or "week").lower().strip()
     if w == "month":
         win_start, win_end = _month_window(today)
     else:
         win_start, win_end = _week_window(today)
 
-    # index employees
     emp_by_id = {}
     for e in employees or []:
         eid = str(e.get("id") or "").strip()
@@ -529,9 +549,7 @@ def capacity_summary(
             "display_name": str(e.get("display_name") or "").strip(),
         }
 
-    # allocate task "units"
     def units_for_task(s: TaskSeries) -> float:
-        # weight is optional. If missing or <=0 => 1
         try:
             wv = float(getattr(s, "weight", 0.0) or 0.0)
             if wv > 0:
@@ -540,7 +558,6 @@ def capacity_summary(
             pass
         return 1.0
 
-    # per person buckets
     by_emp: Dict[str, Dict[str, Any]] = {}
     for eid, e in emp_by_id.items():
         cap_days = _business_days_between(win_start, win_end)
@@ -567,23 +584,15 @@ def capacity_summary(
             eid = str(getattr(s, "owner_id", "") or "").strip()
             if not eid or eid not in by_emp:
                 continue
-            # overlap window
             if getattr(s, "end") < win_start or getattr(s, "start") > win_end:
                 continue
-            # skip fully completed
-            if is_completed(s, today):
-                pass  # still can count done days in window; keep going
 
             u = units_for_task(s)
-
-            # planned counts only if not completed
             if not is_completed(s, today):
                 by_emp[eid]["planned"] += u
 
-            # done units within window: if any done_day in window, count proportional by done days
             dd = getattr(s, "done_days", set()) or set()
             if isinstance(dd, set) and dd:
-                # count business done-days within window and within series range
                 done_in_win = 0
                 for d in dd:
                     if not isinstance(d, date):
@@ -595,7 +604,6 @@ def capacity_summary(
                     if d.weekday() < 5:
                         done_in_win += 1
                 if done_in_win > 0:
-                    # spread units evenly across business days of series
                     biz_days_series = _business_days_between(getattr(s, "start"), getattr(s, "end"))
                     if biz_days_series <= 0:
                         biz_days_series = 1
@@ -608,7 +616,6 @@ def capacity_summary(
         except Exception:
             continue
 
-    # finalize
     for eid, row in by_emp.items():
         planned = float(row["planned"])
         done = float(row["done"])
@@ -618,7 +625,6 @@ def capacity_summary(
         util = planned / cap
         row["utilization"] = util
 
-        # status thresholds
         if util < 0.85:
             row["status"] = "green"
         elif util < 1.10:
@@ -661,11 +667,6 @@ def add_business_days(d: date, n: int) -> date:
 
 
 def series_units(s: TaskSeries) -> float:
-    """
-    Units rule:
-      - if s.weight exists and > 0 => use it
-      - else 1.0
-    """
     try:
         wv = float(getattr(s, "weight", 0.0) or 0.0)
         if wv > 0:
@@ -676,17 +677,6 @@ def series_units(s: TaskSeries) -> float:
 
 
 def compute_units_composition(task_series: List[TaskSeries]):
-    """
-    Build units composition per business day for given tasks.
-    Returns:
-      - all_days: business days covering min(start)..max(end)
-      - done_units_day: units done per day (sum across tasks)
-      - remaining_units_day: remaining units after that day
-      - comp_by_day: for each day: list of dicts per task: {"series_id","title","units_done","units_remaining"}
-    Notes:
-      - units are distributed evenly across business days of each task
-      - a done_day contributes one unit-slice for that day if that day is marked done
-    """
     tasks = [s for s in (task_series or []) if is_task(s) and not getattr(s, "is_meta", False)]
     if not tasks:
         return [], [], [], []
@@ -694,17 +684,14 @@ def compute_units_composition(task_series: List[TaskSeries]):
     min_d = min(getattr(s, "start") for s in tasks)
     max_d = max(getattr(s, "end") for s in tasks)
     all_days = business_days_between_inclusive(min_d, max_d)
-
     day_index = {d: i for i, d in enumerate(all_days)}
+
     done_units_day = [0.0 for _ in all_days]
     total_units = 0.0
-
-    # per day composition details
     comp_by_day: List[List[Dict[str, Any]]] = [[] for _ in all_days]
 
-    # allocate per task
-    per_task_total = {}
-    per_task_daily = {}
+    per_task_total: Dict[str, float] = {}
+    per_task_daily: Dict[str, float] = {}
 
     for s in tasks:
         u = series_units(s)
@@ -716,7 +703,6 @@ def compute_units_composition(task_series: List[TaskSeries]):
         per_task_total[s.series_id] = float(u)
         per_task_daily[s.series_id] = per_day
 
-        # done contributions
         dd = getattr(s, "done_days", set()) or set()
         if not isinstance(dd, set):
             dd = set()
@@ -728,15 +714,13 @@ def compute_units_composition(task_series: List[TaskSeries]):
             units_done = per_day if d in dd else 0.0
             done_units_day[i] += units_done
 
-    # compute remaining series over time
     remaining_units_day: List[float] = []
     cum_done = 0.0
-    for i, d in enumerate(all_days):
+    for i, _d in enumerate(all_days):
         cum_done += float(done_units_day[i])
         remaining = max(0.0, float(total_units) - float(cum_done))
         remaining_units_day.append(remaining)
 
-    # composition per day
     for s in tasks:
         u_total = float(per_task_total.get(s.series_id, 0.0))
         per_day = float(per_task_daily.get(s.series_id, 0.0))
@@ -745,7 +729,6 @@ def compute_units_composition(task_series: List[TaskSeries]):
         if not isinstance(dd, set):
             dd = set()
 
-        # track remaining per task cumulatively
         done_so_far = 0.0
         for d in biz_days:
             i = day_index.get(d)
@@ -782,17 +765,9 @@ def forecast_eta_units(
     today_: date,
     window_business_days: int = 10,
 ):
-    """
-    Forecast based on done units velocity:
-    - Anchor = last day <= today with a done>0, else last <= today
-    - Velocity = average done_units_day over last N business days up to anchor
-    - ETA = anchor + ceil(remaining_at_anchor / velocity) business days
-    - Data quality = days with done>0 within window
-    """
     if not all_days:
         return None, 0.0, None, 0
 
-    # locate anchor index
     last_le_today = 0
     last_done = None
     for i, dd in enumerate(all_days):
@@ -808,7 +783,6 @@ def forecast_eta_units(
     rem_anchor = float(remaining_units_day[anchor_idx]) if anchor_idx < len(remaining_units_day) else 0.0
     vel = avg_last_window_float(done_units_day, anchor_idx, int(window_business_days))
 
-    # data quality
     w = max(1, int(window_business_days))
     start = max(0, anchor_idx - w + 1)
     dq = sum(1 for v in done_units_day[start : anchor_idx + 1] if float(v) > 0.0)
@@ -833,20 +807,6 @@ def build_burndown_series(
     today: Optional[date] = None,
     window_business_days: int = 10,
 ) -> Dict[str, Any]:
-    """
-    App-facing helper:
-    returns a self-contained burndown/velocity package based on units.
-
-    Output keys (stable):
-      - all_days: List[date] (business days)
-      - done_units_day: List[float]
-      - remaining_units_day: List[float]
-      - comp_by_day: List[List[dict]]
-      - anchor_day: Optional[date]
-      - velocity: float
-      - eta: Optional[date]
-      - data_quality_days: int
-    """
     if today is None:
         today = date.today()
 
@@ -873,9 +833,6 @@ def build_burndown_series(
 
 
 def calc_velocity(series_list: List[TaskSeries], today: Optional[date] = None, window_business_days: int = 10) -> float:
-    """
-    App-facing velocity number: avg done units per business day over last window.
-    """
     if today is None:
         today = date.today()
     pkg = build_burndown_series(series_list, today=today, window_business_days=window_business_days)
@@ -883,9 +840,6 @@ def calc_velocity(series_list: List[TaskSeries], today: Optional[date] = None, w
 
 
 def forecast_finish_date(series_list: List[TaskSeries], today: Optional[date] = None, window_business_days: int = 10) -> Optional[date]:
-    """
-    App-facing ETA date based on remaining units and velocity.
-    """
     if today is None:
         today = date.today()
     pkg = build_burndown_series(series_list, today=today, window_business_days=window_business_days)
