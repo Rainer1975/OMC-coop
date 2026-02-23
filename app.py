@@ -50,6 +50,7 @@ from ui_employees import render as render_employees
 from ui_gantt import render as render_gantt
 from ui_home import render as render_home
 from ui_kanban import render as render_kanban
+from ui_glossary import sidebar_glossary, tip as gloss_tip
 
 APP_TITLE = "OMG Coop"
 
@@ -550,6 +551,8 @@ with st.sidebar.expander("Hilfe", expanded=False):
     st.button("🧙 Anfänger", key="beginner_btn")
     st.caption("Hilfe ist kontextsensitiv: öffnet automatisch\nden passenden Abschnitt zur aktuellen\nSeite.")
 
+sidebar_glossary()
+
 # ------------------ Navigation ------------------
 
 NAV_SECTIONS = [
@@ -698,6 +701,7 @@ ctx = {
     "appointment_label": appointment_label,
     "pick_from_list": pick_from_list,
     "pick_owner": pick_owner,  # ✅ FIX: required by ui_detail.py
+    "gloss_tip": gloss_tip,
     "request_done_single": request_done_single,
     "request_done_grid": request_done_grid,
     "employees": st.session_state.employees,
