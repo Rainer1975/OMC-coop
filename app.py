@@ -2,14 +2,10 @@
 from __future__ import annotations
 
 import json
-import math
-import os
 import re
-import tempfile
-from collections import deque
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
@@ -22,6 +18,11 @@ from core import (
     TaskSeries,
     bulk_set_done,
     can_depend_series,
+    capacity_summary,
+    compute_units_composition,
+    build_burndown_series,
+    calc_velocity,
+    forecast_finish_date,
     gantt_items,
     is_active,
     is_appointment,
@@ -37,11 +38,6 @@ from core import (
     total_days,
     unmark_done,
     would_create_cycle,
-    capacity_summary,
-    compute_units_composition,
-    build_burndown_series,
-    calc_velocity,
-    forecast_finish_date,
 )
 
 from ui_admin import render as render_admin
@@ -73,8 +69,8 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
 
-def _list_union(a: list[str], b: list[str]) -> list[str]:
-    out = []
+def _list_union(a: List[str], b: List[str]) -> List[str]:
+    out: List[str] = []
     seen = set()
     for x in (a or []) + (b or []):
         x = _norm(x)
@@ -88,7 +84,7 @@ def _list_union(a: list[str], b: list[str]) -> list[str]:
     return out
 
 
-def load_employees() -> list[dict[str, Any]]:
+def load_employees() -> List[Dict[str, Any]]:
     if not EMP_PATH.exists():
         return []
     try:
@@ -100,11 +96,11 @@ def load_employees() -> list[dict[str, Any]]:
     return []
 
 
-def save_employees(employees: list[dict[str, Any]]) -> None:
+def save_employees(employees: List[Dict[str, Any]]) -> None:
     EMP_PATH.write_text(json.dumps(employees, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def load_lists() -> dict[str, list[str]]:
+def load_lists() -> Dict[str, List[str]]:
     if not LISTS_PATH.exists():
         return dict(DEFAULT_LISTS)
     try:
@@ -120,7 +116,7 @@ def load_lists() -> dict[str, list[str]]:
     return dict(DEFAULT_LISTS)
 
 
-def save_lists(portfolios: list[str], projects: list[str], themes: list[str]) -> None:
+def save_lists(portfolios: List[str], projects: List[str], themes: List[str]) -> None:
     data = {
         "portfolios": _list_union(["Default"], portfolios),
         "projects": _list_union([], projects),
@@ -134,7 +130,6 @@ def persist() -> None:
 
 
 def sync_lists_from_data() -> None:
-    # build lists from series + employees forms
     portfolios = set()
     projects = set()
     themes = set()
@@ -155,22 +150,12 @@ def sync_lists_from_data() -> None:
     )
 
 
-def segmented(label: str, options: list[str], default: str):
-    if hasattr(st, "segmented_control"):
-        return st.segmented_control(label, options, default=default)
-    return st.radio(label, options, index=options.index(default), horizontal=True)
-
-
 def open_detail(series_id: str) -> None:
-    # DETAIL ist absichtlich KEIN Sidebar-Menüpunkt.
-    # Sonst kracht Navigation, wenn ein "Detail"-Item entfernt wird oder nicht existiert.
-    # Deshalb merken wir uns das aktive Sidebar-Item beim Eintritt und verhindern,
-    # dass die Sidebar-Auswahl den Detail-View beim Rerun wieder überschreibt.
     st.session_state.open_series = series_id
     st.session_state.page_prev = st.session_state.page
     st.session_state.nav_select_before_detail = st.session_state.get("nav_select")
     st.session_state.page = "DETAIL"
-    st.session_state.nav_force_sync = True  # Sidebar soll stabil bleiben
+    st.session_state.nav_force_sync = True
     st.rerun()
 
 
@@ -178,7 +163,7 @@ def close_detail() -> None:
     st.session_state.open_series = None
     back = st.session_state.page_prev if st.session_state.page_prev != "DETAIL" else "HOME"
     st.session_state.page = back
-    st.session_state.nav_force_sync = True  # <<< wichtig
+    st.session_state.nav_force_sync = True
     st.rerun()
 
 
@@ -206,15 +191,14 @@ def appointment_label(s: TaskSeries) -> str:
     return f"{s.title}{suffix}"
 
 
-def visible_series() -> list[TaskSeries]:
-    out: list[TaskSeries] = []
+def visible_series() -> List[TaskSeries]:
+    out: List[TaskSeries] = []
     for s in st.session_state.series:
         if st.session_state.focus_mode:
             if getattr(s, "is_meta", False):
                 continue
             if is_appointment(s):
                 continue
-            # focus shows only "active tasks" in many places
         out.append(s)
     return out
 
@@ -222,7 +206,7 @@ def visible_series() -> list[TaskSeries]:
 def pick_from_list(
     label: str,
     key: str,
-    values: list[str],
+    values: List[str],
     current: str = "",
     require: bool = True,
     list_key: str = "",
@@ -234,12 +218,11 @@ def pick_from_list(
         values = [cur] + values
 
     options = values + [ADD_NEW] if values else [ADD_NEW]
-
     idx = options.index(cur) if cur in options else 0
 
     pick = st.selectbox(label, options=options, index=idx, key=key)
 
-    # FORM-SAFE: Eingabefeld immer sichtbar (sonst erscheint es in Forms nie rechtzeitig)
+    # FORM-SAFE: input always visible
     new_key = f"{key}__new"
     new_val = st.text_input(
         f"{label} (new – nur wenn 'Add new...' gewählt)",
@@ -266,14 +249,11 @@ def pick_from_list(
 
 
 def request_done_single(series_id: str, day: date, reason: str = "") -> None:
-    # Store a simple request in session_state; ui_detail/home can confirm
     st.session_state.done_requests = st.session_state.get("done_requests", [])
-    st.session_state.done_requests.append(
-        {"series_id": series_id, "day_iso": day.isoformat(), "reason": reason or ""}
-    )
+    st.session_state.done_requests.append({"series_id": series_id, "day_iso": day.isoformat(), "reason": reason or ""})
 
 
-def request_done_grid(items: list[dict[str, str]], reason: str = "") -> None:
+def request_done_grid(items: List[Dict[str, str]], reason: str = "") -> None:
     st.session_state.done_requests = st.session_state.get("done_requests", [])
     for it in items:
         st.session_state.done_requests.append({"series_id": it["series_id"], "day_iso": it["day_iso"], "reason": reason})
@@ -302,7 +282,6 @@ def handle_done_requests() -> None:
                 mark_done(s, date.fromisoformat(day_iso))
                 persist()
             elif row[2].button("Ablehnen", key=f"done_no_{i}_{sid}_{day_iso}"):
-                # simply drop
                 pass
             else:
                 keep.append(r)
@@ -334,14 +313,12 @@ today = date.today()
 
 st.sidebar.title(APP_TITLE)
 
-# focus mode toggle
 st.session_state.focus_mode = st.sidebar.toggle(
     "Focus mode (only active tasks,\nno META, no appointments)",
     value=bool(st.session_state.get("focus_mode", False)),
     key="focus_mode_toggle",
 )
 
-# compute sidebar KPIs (simple)
 v = visible_series()
 k_today = sum(1 for s in v if is_task(s) and s.start <= today <= s.end and not is_completed(s, today))
 k_overdue = sum(1 for s in v if is_task(s) and is_overdue(s, today) and not is_completed(s, today))
@@ -354,10 +331,8 @@ c2.metric("Overdue", k_overdue)
 c3.metric("Active", k_active)
 c4.metric("Meta", k_meta)
 
-# done requests (quittierung)
 handle_done_requests()
 
-# help buttons (kept, but compact)
 with st.sidebar.expander("Hilfe", expanded=False):
     st.button("❓ Hilfe", key="help_btn")
     st.button("🧙 Anfänger", key="beginner_btn")
@@ -365,7 +340,6 @@ with st.sidebar.expander("Hilfe", expanded=False):
 
 # ------------------ Navigation ------------------
 
-# Define navigation sections
 NAV_SECTIONS = [
     ("Start", [("Home", "HOME")]),
     ("Work", [("Kanban", "KANBAN"), ("Gantt", "GANTT"), ("Burndown", "BURNDOWN"), ("Dashboard", "DASHBOARD")]),
@@ -373,10 +347,9 @@ NAV_SECTIONS = [
     ("Admin", [("Data", "DATA"), ("Admin", "ADMIN")]),
 ]
 
-# in simplified mode we can render only a subset via another UI module, but keep structure here.
-display_options: list[str] = []
-display_to_code: dict[str, str] = {}
-code_to_display: dict[str, str] = {}
+display_options: List[str] = []
+display_to_code: Dict[str, str] = {}
+code_to_display: Dict[str, str] = {}
 
 for sec, items in NAV_SECTIONS:
     for label, code in items:
@@ -385,9 +358,6 @@ for sec, items in NAV_SECTIONS:
         code_to_display[code] = disp
         display_options.append(disp)
 
-# Zielanzeige aus aktueller Page ableiten
-# DETAIL ist kein Sidebar-Menüpunkt. Wenn wir im Detail sind, soll die Sidebar optisch
-# beim vorherigen Menüpunkt bleiben (sonst springt sie auf HOME und überschreibt DETAIL).
 if st.session_state.page == "DETAIL":
     cur_disp = st.session_state.get("nav_select_before_detail") or code_to_display.get(
         st.session_state.get("page_prev") or "HOME",
@@ -397,10 +367,7 @@ else:
     cur_code = st.session_state.page if st.session_state.page in code_to_display else "HOME"
     cur_disp = code_to_display.get(cur_code, display_options[0])
 
-# Nur bei programmatischen Page-Wechseln: nav_select auf aktuelle Page setzen
-# Achtung: im DETAIL-Modus setzen wir nav_select NICHT auf HOME.
-
-# selectbox rendern (WICHTIG: kein index/value, nur session_state steuert den Default)
+# IMPORTANT: session_state drives the selectbox default (no index/value)
 if "nav_select" not in st.session_state:
     st.session_state["nav_select"] = cur_disp
 
@@ -415,15 +382,10 @@ picked_disp = st.sidebar.selectbox(
     key="nav_select",
 )
 
-# User-Auswahl -> page setzen
 picked_page = display_to_code.get(picked_disp, "HOME")
 
-# Sonderfall DETAIL:
-# Wenn wir im Detail sind, bleibt die Sidebar optisch auf dem vorherigen Menüpunkt stehen.
-# Das darf den Detail-View nicht sofort wieder weg-navigieren.
 if st.session_state.page == "DETAIL":
     before = st.session_state.get("nav_select_before_detail")
-    # Nur wenn der User im Dropdown wirklich etwas anderes auswählt, verlassen wir DETAIL.
     if before is not None and picked_disp == before:
         picked_page = "DETAIL"
 
@@ -431,14 +393,13 @@ if picked_page != st.session_state.page:
     st.session_state.page_prev = st.session_state.page
     st.session_state.page = picked_page
     st.session_state.nav_force_sync = False
-    # If leaving detail by nav, close detail state
     if picked_page != "DETAIL":
         st.session_state.open_series = None
     st.rerun()
 
-# quick add (kept)
 with st.sidebar.expander("Quick add (task)", expanded=False):
     qa_title = st.text_input("Title", key="qa_title")
+
     qa_owner = st.selectbox(
         "Owner",
         options=[e.get("display_name", "") for e in st.session_state.employees if e.get("display_name")],
@@ -450,22 +411,14 @@ with st.sidebar.expander("Quick add (task)", expanded=False):
         if e.get("display_name") == qa_owner:
             qa_owner_id = e.get("id", "")
             break
-    qa_project = pick_from_list(
-        "Project", key="qa_project", values=st.session_state.lists.get("projects", []), current="", require=True, list_key="projects"
-    )
-    qa_theme = pick_from_list(
-        "Theme", key="qa_theme", values=st.session_state.lists.get("themes", []), current="General", require=True, list_key="themes"
-    )
-    qa_portfolio = pick_from_list(
-        "Portfolio",
-        key="qa_portfolio",
-        values=st.session_state.lists.get("portfolios", []),
-        current="Default",
-        require=True,
-        list_key="portfolios",
-    )
+
+    qa_project = pick_from_list("Project", key="qa_project", values=st.session_state.lists.get("projects", []), current="", require=True, list_key="projects")
+    qa_theme = pick_from_list("Theme", key="qa_theme", values=st.session_state.lists.get("themes", []), current="General", require=True, list_key="themes")
+    qa_portfolio = pick_from_list("Portfolio", key="qa_portfolio", values=st.session_state.lists.get("portfolios", []), current="Default", require=True, list_key="portfolios")
+
     qa_days = st.number_input("Duration (days)", min_value=1, max_value=30, value=5, step=1, key="qa_days")
     qa_weight = st.number_input("Weight/Units", min_value=0.0, max_value=1000.0, value=1.0, step=1.0, key="qa_weight")
+
     if st.button("Add", key="qa_add"):
         if qa_title.strip():
             s = new_series(
@@ -532,12 +485,16 @@ ctx = {
     "build_burndown_series": build_burndown_series,
     "calc_velocity": calc_velocity,
     "forecast_finish_date": forecast_finish_date,
+
+    # ✅ REQUIRED by ui_data.py (fix for KeyError)
+    "DATA_FILE": str(STATE_PATH),
+    "EMP_FILE": str(EMP_PATH),
+    "LISTS_FILE": str(LISTS_PATH),
 }
 
 # ------------------ Main render ------------------
 
 if st.session_state.page == "DETAIL":
-    # detail view requires open_series
     if not st.session_state.open_series:
         st.warning("No item selected.")
         st.session_state.page = "HOME"
