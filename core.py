@@ -532,7 +532,21 @@ def capacity_summary(
     today: date,
     window: str = "week",
     default_capacity_per_day: float = 5.0,
+    **kwargs: Any,
 ) -> Dict[str, Any]:
+    """Compute a simple capacity/utilization view per employee.
+
+    Stability note:
+    UI modules may call this function with slightly different parameter names.
+    We accept **kwargs and common aliases to avoid hard crashes.
+    """
+    # Accept common aliases (do not crash if passed)
+    for k in ("cap_per_day", "capacity_per_day", "default_cap_per_day", "default_capacity"):
+        if k in kwargs and kwargs[k] is not None:
+            try:
+                default_capacity_per_day = float(kwargs[k])
+            except Exception:
+                pass
     w = (window or "week").lower().strip()
     if w == "month":
         win_start, win_end = _month_window(today)

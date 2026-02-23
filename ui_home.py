@@ -14,7 +14,6 @@ from core import (
 
 
 def render(ctx) -> None:
-    gloss_tip = ctx.get("gloss_tip", lambda _t: "")
     """Home dashboard.
 
     Fixes:

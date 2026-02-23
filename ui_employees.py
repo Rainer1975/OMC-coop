@@ -95,80 +95,6 @@ def _series_exists(
     return False
 
 
-
-def _render_personal_calendar(ctx: dict, owner_id: str, owner_name: str) -> None:
-    """Simple personal calendar (week view) at top of Employees page.
-
-    - Shows tasks + appointments for the selected employee
-    - Items are clickable -> opens Detail
-    - Keeps it simple: week navigation + day columns
-    """
-    open_detail = ctx["open_detail"]
-    is_task = ctx["is_task"]
-    is_appointment = ctx["is_appointment"]
-
-    # calendar state (per employee)
-    week_key = f"emp_cal_week_offset__{owner_id}"
-    if week_key not in st.session_state:
-        st.session_state[week_key] = 0
-
-    nav1, nav2, nav3, nav4 = st.columns([1, 1, 3, 1])
-    if nav1.button("◀ Vorwoche", key=f"{week_key}__prev"):
-        st.session_state[week_key] -= 1
-        st.rerun()
-    if nav2.button("Nächste Woche ▶", key=f"{week_key}__next"):
-        st.session_state[week_key] += 1
-        st.rerun()
-
-    offset = int(st.session_state[week_key])
-    base = ctx["today"]
-    # monday of current week
-    monday = base - timedelta(days=base.weekday())
-    monday = monday + timedelta(days=offset * 7)
-    days = [monday + timedelta(days=i) for i in range(7)]
-
-    nav3.markdown(f"### Kalender: {owner_name}")
-    nav4.caption(f"Woche ab {days[0].isoformat()}")
-
-    # collect items
-    items = []
-    for s in st.session_state.series:
-        try:
-            if _norm(getattr(s, "owner_id", "")) != _norm(owner_id):
-                continue
-            stt = getattr(s, "start", None)
-            end = getattr(s, "end", None)
-            if not isinstance(stt, date) or not isinstance(end, date):
-                continue
-            # overlap with week
-            if end < days[0] or stt > days[-1]:
-                continue
-
-            kind = "Task" if is_task(s) else ("Termin" if is_appointment(s) else "Item")
-            title = getattr(s, "title", "")
-            items.append((s, kind, title, stt, end))
-        except Exception:
-            continue
-
-    cols = st.columns(7)
-    for i, d in enumerate(days):
-        with cols[i]:
-            st.markdown(f"**{d.strftime('%a %d.%m')}**")
-            todays = []
-            for s, kind, title, stt, end in items:
-                if stt <= d <= end:
-                    todays.append((s, kind, title, stt, end))
-            if not todays:
-                st.caption("—")
-            else:
-                for s, kind, title, stt, end in sorted(todays, key=lambda x: (x[3], x[2])):
-                    # compact label
-                    rng = "" if stt == end else f" ({stt.strftime('%d.%m')}-{end.strftime('%d.%m')})"
-                    label = f"{kind}: {title}{rng}"
-                    if st.button(label, key=f"emp_cal_open_{owner_id}_{s.series_id}_{d.isoformat()}"):
-                        open_detail(s.series_id)
-
-
 def render(ctx: dict) -> None:
     today = ctx["today"]
     pick_from_list = ctx["pick_from_list"]
@@ -206,8 +132,59 @@ def render(ctx: dict) -> None:
     pick_id = emp_ids[pick_idx]
     pick_name = pick_label
 
-    # -------- Personal calendar (top)
-    _render_personal_calendar(ctx, pick_id, pick_name)
+    # =========================================================
+    # PERSONAL CALENDAR (top) – tasks + appointments, clickable
+    # =========================================================
+    st.subheader(
+        f"Kalender · {pick_name}",
+        help="Wochenübersicht für den ausgewählten Mitarbeiter. Einträge sind klickbar und öffnen die Detail-Seite (inkl. Löschen).",
+    )
+
+    series_all = list(st.session_state.series)
+    my_items = [
+        s
+        for s in series_all
+        if _norm(getattr(s, "owner_id", "")) == _norm(pick_id)
+        and (is_task(s) or is_appointment(s))
+    ]
+
+    # Week start (Monday)
+    default_monday = today if today.weekday() == 0 else (today - timedelta(days=today.weekday()))
+    cal_week_start = st.date_input(
+        "Woche ab (Montag)",
+        value=default_monday,
+        key=f"emp_cal_week_start_{pick_id}",
+    )
+    # normalize to monday
+    if cal_week_start.weekday() != 0:
+        cal_week_start = cal_week_start - timedelta(days=cal_week_start.weekday())
+    days = [cal_week_start + timedelta(days=i) for i in range(7)]
+
+    cols = st.columns(7)
+    for i, d in enumerate(days):
+        with cols[i]:
+            st.markdown(f"**{d.strftime('%a')}**")
+            st.caption(d.isoformat())
+
+            # appointments on this day
+            appts = [s for s in my_items if is_appointment(s) and getattr(s, "start") == d]
+            for s in sorted(appts, key=lambda x: (getattr(x, "time_start", ""), getattr(x, "title", ""))):
+                label = f"📅 {getattr(s, 'title', '')}"
+                if (getattr(s, "time_start", "") or "").strip():
+                    label += f" ({getattr(s, 'time_start', '').strip()})"
+                if st.button(label, key=f"emp_cal_appt_{pick_id}_{s.series_id}_{d.isoformat()}"):
+                    open_detail(s.series_id)
+
+            # tasks spanning this day
+            tks = [s for s in my_items if is_task(s) and getattr(s, "start") <= d <= getattr(s, "end")]
+            for s in sorted(tks, key=lambda x: (getattr(x, "end"), getattr(x, "title", "")))[:8]:
+                prefix = "✅" if is_completed(s, today) else "🧩"
+                label = f"{prefix} {getattr(s, 'title', '')}"
+                if st.button(label, key=f"emp_cal_task_{pick_id}_{s.series_id}_{d.isoformat()}"):
+                    open_detail(s.series_id)
+
+            if len(tks) > 8:
+                st.caption(f"+{len(tks)-8} mehr …")
 
     # -------- Tabs
     tab_task, tab_appt = st.tabs(["➕ Create task", "📅 Create appointment"])
