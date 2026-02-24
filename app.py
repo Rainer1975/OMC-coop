@@ -227,13 +227,65 @@ def load_lists() -> Dict[str, List[str]]:
     return dict(DEFAULT_LISTS)
 
 
-def save_lists(portfolios: List[str], projects: List[str], themes: List[str]) -> None:
+def _extract_list_values(x: Any) -> List[str]:
+    """Normalize list inputs coming from UI editors.
+
+    Accepts:
+      - list[str]
+      - list[dict] with key 'value' (e.g., st.data_editor rows)
+      - None
+    """    if x is None:
+        return []
+    if isinstance(x, list):
+        out: List[str] = []
+        for item in x:
+            if isinstance(item, dict):
+                v = item.get("value")
+                if v is None:
+                    continue
+                v = _norm(v)
+                if v:
+                    out.append(v)
+            else:
+                v = _norm(item)
+                if v:
+                    out.append(v)
+        return out
+    v = _norm(x)
+    return [v] if v else []
+
+
+def save_lists(*args, **kwargs) -> None:
+    """Persist portfolios/projects/themes.
+
+    Backwards compatible with both call styles:
+      1) save_lists(portfolios, projects, themes)
+      2) save_lists({"portfolios": ..., "projects": ..., "themes": ...})
+    """    portfolios: List[str] = []
+    projects: List[str] = []
+    themes: List[str] = []
+
+    if len(args) == 1 and isinstance(args[0], dict):
+        d = args[0]
+        portfolios = _extract_list_values(d.get("portfolios"))
+        projects = _extract_list_values(d.get("projects"))
+        themes = _extract_list_values(d.get("themes"))
+    elif len(args) >= 3:
+        portfolios = _extract_list_values(args[0])
+        projects = _extract_list_values(args[1])
+        themes = _extract_list_values(args[2])
+    else:
+        portfolios = _extract_list_values(kwargs.get("portfolios"))
+        projects = _extract_list_values(kwargs.get("projects"))
+        themes = _extract_list_values(kwargs.get("themes"))
+
     data = {
         "portfolios": _list_union(["Default"], portfolios),
         "projects": _list_union([], projects),
         "themes": _list_union(["General", "Termin"], themes),
     }
     LISTS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
 
 
 def persist() -> None:
