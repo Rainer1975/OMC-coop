@@ -337,12 +337,19 @@ def render(ctx: dict) -> None:
             st.caption("DONE Tage (Future disabled).")
             mark_day = st.date_input("Tag auswählen", value=today, key=f"detail_done_pick_{sid}")
             c1, c2 = st.columns(2)
-            if c1.button("✅ DONE setzen", key=f"detail_done_set_{sid}"):
+            already_done = mark_day in done_days
+            future_disabled = mark_day > today
+            if c1.button(
+                "✅ DONE setzen",
+                key=f"detail_done_set_{sid}",
+                disabled=already_done or future_disabled,
+                use_container_width=True,
+            ):
                 if mark_day > today:
                     st.warning("Future ist deaktiviert. Kein DONE in der Zukunft.")
                 else:
                     ctx["request_done_single"](sid, mark_day, reason="Detail: DONE setzen")
-            if c2.button("↩️ DONE entfernen", key=f"detail_done_unset_{sid}"):
+            if c2.button("↩️ DONE entfernen", key=f"detail_done_unset_{sid}", use_container_width=True):
                 if mark_day in done_days:
                     if "actor" in getattr(ctx["unmark_done"], "__code__", type("x", (), {"co_varnames": ()}))().co_varnames:
                         ctx["unmark_done"](s, mark_day, actor="ui")
@@ -361,6 +368,9 @@ def render(ctx: dict) -> None:
                     st.rerun()
                 else:
                     st.info("Der Tag ist nicht als DONE markiert.")
+
+            if already_done:
+                st.caption("Dieser Tag ist bereits DONE → 'DONE setzen' ist deaktiviert.")
 
         st.markdown("---")
         st.subheader("Dependencies")

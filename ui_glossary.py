@@ -29,7 +29,8 @@ def tip(term: str) -> str:
     if not expl:
         return ""
     # HTML is the simplest way to guarantee a real mouseover tooltip.
-    return f"<span title='{expl.replace("'", "&#39;")}' style='cursor:help; margin-left:6px; color:#888;'>ⓘ</span>"
+    safe = expl.replace("'", "&#39;")
+    return f"<span title='{safe}' style='cursor:help; margin-left:6px; color:#888;'>ⓘ</span>"
 
 def sidebar_glossary() -> None:
     with st.sidebar.expander("Glossar", expanded=False):

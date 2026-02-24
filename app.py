@@ -237,13 +237,27 @@ def pick_from_list(
             return "" if require else ""
         new_val = _norm(new_val)
         if list_key:
-            if new_val not in st.session_state.lists.get(list_key, []):
-                st.session_state.lists[list_key] = _list_union(st.session_state.lists.get(list_key, []), [new_val])
+            prev = list(st.session_state.lists.get(list_key, []) or [])
+            if new_val not in prev:
+                st.session_state.lists[list_key] = _list_union(prev, [new_val])
                 save_lists(
                     st.session_state.lists.get("portfolios", []),
                     st.session_state.lists.get("projects", []),
                     st.session_state.lists.get("themes", []),
                 )
+                # Bug/UX fix: make it obvious that the new value was accepted.
+                # - select the new value on next rerun
+                # - clear the input field
+                # - store a small notice for feedback after submit
+                try:
+                    st.session_state[key] = new_val
+                except Exception:
+                    pass
+                try:
+                    st.session_state[new_key] = ""
+                except Exception:
+                    pass
+                st.session_state["_last_list_add"] = {"list_key": list_key, "value": new_val}
         return new_val
 
     return pick
@@ -553,14 +567,24 @@ def handle_done_requests() -> None:
                 s = find_series(sid)
             except Exception:
                 continue
-            row = st.columns([5, 2, 2])
+            row = st.columns([6, 2, 2])
             row[0].write(f"**{s.title}** · {day_iso}")
             if reason:
                 row[0].caption(reason)
-            if row[1].button("Quittieren", key=f"done_ok_{i}_{sid}_{day_iso}"):
+            if row[1].button(
+                "✅ Quittieren",
+                key=f"done_ok_{i}_{sid}_{day_iso}",
+                type="primary",
+                use_container_width=True,
+            ):
                 mark_done(s, date.fromisoformat(day_iso))
                 persist()
-            elif row[2].button("Ablehnen", key=f"done_no_{i}_{sid}_{day_iso}"):
+            elif row[2].button(
+                "✋ Ablehnen",
+                key=f"done_no_{i}_{sid}_{day_iso}",
+                type="secondary",
+                use_container_width=True,
+            ):
                 pass
             else:
                 keep.append(r)
@@ -611,6 +635,15 @@ c3.metric("Active", k_active)
 c4.metric("Meta", k_meta)
 
 handle_done_requests()
+
+# One-shot feedback when a new list value was created via 'Add new...' inputs.
+# This fixes the "created but not visible/confirmed" confusion without changing any flows.
+_notice = st.session_state.pop("_last_list_add", None)
+if isinstance(_notice, dict) and _notice.get("value"):
+    try:
+        st.toast(f"Neuer Eintrag gespeichert: {_notice['value']}")
+    except Exception:
+        st.success(f"Neuer Eintrag gespeichert: {_notice['value']}")
 
 with st.sidebar.expander("Hilfe", expanded=False):
     st.button("❓ Hilfe", key="help_btn")
