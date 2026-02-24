@@ -376,81 +376,148 @@ def _business_days(ws: date, we: date) -> int:
     return n
 
 
-def capacity_summary(tasks_all: List[TaskSeries], employees: List[Dict[str, Any]], today: date, ws: date, we: date) -> List[Dict[str, Any]]:
-    """UI-friendly wrapper (used by ui_dashboard.py)."""
-    CAP_PER_DAY = 5.0
+def capacity_summary(
+    tasks_all: List[TaskSeries],
+    employees: List[Dict[str, Any]],
+    today: date,
+    ws: Optional[date] = None,
+    we: Optional[date] = None,
+    window: str = "week",
+    default_capacity_per_day: float = 5.0,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Capacity summary wrapper used by ui_dashboard.py.
 
-    emp_rows: Dict[str, Dict[str, Any]] = {}
-    for e in employees or []:
-        eid = str(e.get("id") or "").strip()
-        dn = str(e.get("display_name") or "").strip()
-        if not eid or not dn:
-            continue
-        emp_rows[eid] = {"owner": dn, "owner_id": eid, "planned": 0.0, "done": 0.0, "overdue": 0}
+    Why this exists:
+    - Older code called capacity_summary(tasks, employees, today, ws, we).
+    - Newer UI calls capacity_summary(..., window="week"|"month", default_capacity_per_day=...).
 
-    emp_rows.setdefault("", {"owner": "Unassigned", "owner_id": "", "planned": 0.0, "done": 0.0, "overdue": 0})
+    This wrapper supports both call styles and always returns the dict structure expected by ui_dashboard.py:
+    {
+      "window": "week"|"month"|"custom",
+      "window_start": <date>,
+      "window_end": <date>,
+      "by_employee": { employee_id: {...} }
+    }
+    """
 
-    def units(s: TaskSeries) -> float:
-        try:
-            w = float(getattr(s, "weight", 0.0) or 0.0)
-            return w if w > 0 else 1.0
-        except Exception:
-            return 1.0
+    # Accept common aliases without crashing (stability for UI modules)
+    for k in ("cap_per_day", "capacity_per_day", "default_cap_per_day", "default_capacity"):
+        if k in kwargs and kwargs[k] is not None:
+            try:
+                default_capacity_per_day = float(kwargs[k])
+            except Exception:
+                pass
 
-    for s in tasks_all or []:
-        if not is_task(s):
-            continue
-        if getattr(s, "end") < ws or getattr(s, "start") > we:
-            continue
+    # If the caller provides an explicit start/end window, use it (legacy call style).
+    if isinstance(ws, date) and isinstance(we, date):
+        win_start, win_end = ws, we
+        cap_days = max(1, _business_days(win_start, win_end))
 
-        eid = str(getattr(s, "owner_id", "") or "").strip()
-        row = emp_rows.get(eid) or emp_rows[""]
-        u = units(s)
-
-        if not is_completed(s, today):
-            row["planned"] += u
-
-        dd = getattr(s, "done_days", set()) or set()
-        if isinstance(dd, set) and dd:
-            sd = max(getattr(s, "start"), ws)
-            ed = min(getattr(s, "end"), we)
-
-            full_bd = max(1, _business_days(getattr(s, "start"), getattr(s, "end")))
-            per_day = u / float(full_bd)
-
-            d = sd
-            while d <= ed:
-                if d.weekday() < 5 and d in dd:
-                    row["done"] += per_day
-                d += timedelta(days=1)
-
-        if is_overdue(s, today):
-            row["overdue"] += 1
-
-    cap_days = max(1, _business_days(ws, we))
-    cap_val = float(cap_days) * CAP_PER_DAY
-
-    out = []
-    for _eid, row in emp_rows.items():
-        planned = float(row["planned"])
-        done = float(row["done"])
-        remaining = max(0.0, planned - done)
-        util = planned / cap_val if cap_val > 0 else 0.0
-        out.append(
-            {
-                "owner": row["owner"],
-                "owner_id": row["owner_id"],
-                "planned": planned,
-                "done": done,
-                "remaining": remaining,
-                "overdue": int(row["overdue"]),
-                "capacity": cap_val,
-                "util": util,
+        emp_by_id: Dict[str, Dict[str, Any]] = {}
+        for e in employees or []:
+            eid = str(e.get("id") or "").strip()
+            if not eid:
+                continue
+            emp_by_id[eid] = {
+                "id": eid,
+                "name": str(e.get("display_name") or "").strip() or eid,
             }
-        )
 
-    out.sort(key=lambda r: (r["owner"] == "Unassigned", -float(r.get("util", 0.0))))
-    return out
+        def units(s: TaskSeries) -> float:
+            try:
+                wv = float(getattr(s, "weight", 0.0) or 0.0)
+                return wv if wv > 0 else 1.0
+            except Exception:
+                return 1.0
+
+        by_emp: Dict[str, Dict[str, Any]] = {}
+        for eid, e in emp_by_id.items():
+            cap = float(cap_days) * float(default_capacity_per_day)
+            by_emp[eid] = {
+                "id": eid,
+                "name": e.get("name") or eid,
+                "window_start": win_start,
+                "window_end": win_end,
+                "capacity": cap,
+                "planned": 0.0,
+                "done": 0.0,
+                "remaining": 0.0,
+                "overdue": 0,
+                "utilization": 0.0,
+                "status": "green",
+                "tasks": [],
+            }
+
+        for s in tasks_all or []:
+            try:
+                if not is_task(s):
+                    continue
+                eid = str(getattr(s, "owner_id", "") or "").strip()
+                if not eid or eid not in by_emp:
+                    continue
+                if getattr(s, "end") < win_start or getattr(s, "start") > win_end:
+                    continue
+
+                u = units(s)
+                if not is_completed(s, today):
+                    by_emp[eid]["planned"] += u
+
+                dd = getattr(s, "done_days", set()) or set()
+                if isinstance(dd, set) and dd:
+                    sd = max(getattr(s, "start"), win_start)
+                    ed = min(getattr(s, "end"), win_end)
+
+                    full_bd = max(1, _business_days(getattr(s, "start"), getattr(s, "end")))
+                    per_day = float(u) / float(full_bd)
+
+                    d = sd
+                    while d <= ed:
+                        if d.weekday() < 5 and d in dd:
+                            by_emp[eid]["done"] += per_day
+                        d += timedelta(days=1)
+
+                if is_overdue(s, today):
+                    by_emp[eid]["overdue"] += 1
+
+                by_emp[eid]["tasks"].append(s)
+            except Exception:
+                continue
+
+        for _eid, row in by_emp.items():
+            planned = float(row["planned"])
+            done = float(row["done"])
+            remaining = max(0.0, planned - done)
+            row["remaining"] = remaining
+
+            cap = float(row["capacity"]) if float(row["capacity"]) > 0 else 1.0
+            util = planned / cap
+            row["utilization"] = util
+
+            if util < 0.85:
+                row["status"] = "green"
+            elif util < 1.10:
+                row["status"] = "yellow"
+            else:
+                row["status"] = "red"
+
+        return {
+            "window": "custom",
+            "window_start": win_start,
+            "window_end": win_end,
+            "by_employee": by_emp,
+        }
+
+    # Default path: delegate to the canonical implementation in core.py
+    return core_capacity_summary(
+        tasks_all,
+        employees=employees,
+        today=today,
+        window=window,
+        default_capacity_per_day=default_capacity_per_day,
+        **kwargs,
+    )
+
 
 
 def compute_done_composition(tasks: List[TaskSeries]):
