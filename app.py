@@ -234,7 +234,8 @@ def _extract_list_values(x: Any) -> List[str]:
       - list[str]
       - list[dict] with key 'value' (e.g., st.data_editor rows)
       - None
-    """    if x is None:
+    """
+    if x is None:
         return []
     if isinstance(x, list):
         out: List[str] = []
@@ -261,7 +262,8 @@ def save_lists(*args, **kwargs) -> None:
     Backwards compatible with both call styles:
       1) save_lists(portfolios, projects, themes)
       2) save_lists({"portfolios": ..., "projects": ..., "themes": ...})
-    """    portfolios: List[str] = []
+    """
+    portfolios: List[str] = []
     projects: List[str] = []
     themes: List[str] = []
 
@@ -285,7 +287,6 @@ def save_lists(*args, **kwargs) -> None:
         "themes": _list_union(["General", "Termin"], themes),
     }
     LISTS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
 
 
 def persist() -> None:
@@ -331,404 +332,258 @@ def close_detail() -> None:
 
 
 def find_series(series_id: str) -> TaskSeries:
-    return next(x for x in st.session_state.series if x.series_id == series_id)
-
-
-def delete_series(series_id: str) -> None:
-    st.session_state.series = [x for x in st.session_state.series if x.series_id != series_id]
-    persist()
-
-
-def appointment_label(s: TaskSeries) -> str:
-    ts = (getattr(s, "time_start", "") or "").strip()
-    te = (getattr(s, "time_end", "") or "").strip()
-    loc = (getattr(s, "location", "") or "").strip()
-    parts = []
-    if ts and te:
-        parts.append(f"{ts}–{te}")
-    elif ts:
-        parts.append(ts)
-    if loc:
-        parts.append(loc)
-    suffix = (" · " + " · ".join(parts)) if parts else ""
-    return f"{s.title}{suffix}"
+    for s in st.session_state.series:
+        if getattr(s, "id", "") == series_id:
+            return s
+    raise KeyError(series_id)
 
 
 def visible_series() -> List[TaskSeries]:
     out: List[TaskSeries] = []
     for s in st.session_state.series:
-        if st.session_state.focus_mode:
+        if st.session_state.get("focus_mode", False):
             if getattr(s, "is_meta", False):
                 continue
             if is_appointment(s):
                 continue
+            if is_task(s) and not is_active(s):
+                continue
         out.append(s)
     return out
+
+
+def appointment_label(s: TaskSeries) -> str:
+    owner = getattr(s, "owner", "") or "—"
+    proj = getattr(s, "project", "") or "—"
+    return f"{owner} · {proj}"
+
+
+def pick_owner(label: str, key: str, current_owner: str = "") -> Tuple[str, str]:
+    """Owner picker returning (display_name, owner_id)."""
+    employees = st.session_state.employees
+    names = [e.get("display_name", "") for e in employees if e.get("display_name")]
+    names = [n for n in names if n]
+    if not names:
+        st.selectbox(label, ["—"], index=0, key=key)
+        return "—", ""
+    if current_owner and current_owner in names:
+        idx = names.index(current_owner)
+    else:
+        idx = 0
+    picked = st.selectbox(label, names, index=idx, key=key)
+    owner_id = ""
+    for e in employees:
+        if e.get("display_name") == picked:
+            owner_id = str(e.get("id") or "")
+            break
+    return picked, owner_id
+
+
+def resolve_owner_id(owner_name: str) -> str:
+    owner_name = _norm(owner_name)
+    if not owner_name:
+        return ""
+    for e in st.session_state.employees:
+        if _norm(e.get("display_name", "")) == owner_name:
+            return str(e.get("id") or "")
+        aliases = e.get("aliases", []) or []
+        for a in aliases:
+            if _norm(str(a)) == owner_name:
+                return str(e.get("id") or "")
+    return ""
+
+
+def capacity_summary(
+    tasks: List[TaskSeries],
+    window: Tuple[date, date] | None = None,
+    default_capacity_per_day: float = 5.0,
+    ws: Optional[date] = None,
+    we: Optional[date] = None,
+) -> Dict[str, Any]:
+    """Compatibility wrapper around core.capacity_summary.
+
+    New UI calls:
+      capacity_summary(tasks, window=(ws,we), default_capacity_per_day=..)
+
+    Old call sites might still pass:
+      capacity_summary(tasks, ws, we, default_capacity_per_day)
+
+    This wrapper keeps both working and always returns a dict as expected by ui_dashboard.py.
+    """
+    if window is None and ws is not None and we is not None:
+        window = (ws, we)
+
+    # Fall back to "week from today" if nothing is provided.
+    if window is None:
+        ws0 = date.today()
+        we0 = ws0 + timedelta(days=6)
+        window = (ws0, we0)
+
+    try:
+        return core_capacity_summary(
+            tasks=tasks,
+            window=window,
+            default_capacity_per_day=float(default_capacity_per_day),
+        )
+    except TypeError:
+        # Extremely defensive: if core changes, provide a stable minimal structure
+        ws2, we2 = window
+        return {
+            "window": (ws2, we2),
+            "by_owner": {},
+            "totals": {
+                "capacity": 0.0,
+                "planned": 0.0,
+                "remaining": 0.0,
+                "pct": 0.0,
+                "overdue": 0,
+            },
+        }
+
+
+def delete_series(series_id: str) -> None:
+    st.session_state.series = [s for s in st.session_state.series if getattr(s, "id", "") != series_id]
+    persist()
+
+
+def save_series(series: TaskSeries) -> None:
+    # Replace by id
+    sid = getattr(series, "id", "")
+    for i, s in enumerate(st.session_state.series):
+        if getattr(s, "id", "") == sid:
+            st.session_state.series[i] = series
+            break
+    persist()
+
+
+def safe_container(n: int = 1):
+    cols = st.columns(n)
+    return cols
+
+
+def segmented(options: List[str], key: str, default: str) -> str:
+    if default not in options:
+        default = options[0]
+    idx = options.index(default)
+    return st.radio("", options, horizontal=True, index=idx, key=key)
+
+
+def compute_done_composition(series: TaskSeries, today: date) -> Dict[str, float]:
+    # Units composition helper
+    parts = getattr(series, "parts", []) or []
+    if not parts:
+        return {"done": 0.0, "open": 0.0}
+    done = 0.0
+    open_u = 0.0
+    for p in parts:
+        try:
+            w = float(getattr(p, "weight", 0.0) or 0.0)
+        except Exception:
+            w = 0.0
+        if getattr(p, "done", False):
+            done += w
+        else:
+            open_u += w
+    return {"done": done, "open": open_u}
+
+
+def forecast_eta(series: TaskSeries, today: date) -> Dict[str, Any]:
+    # Wrapper with safe output schema for ui_data
+    try:
+        return forecast_eta_units(series, today=today)
+    except Exception:
+        return {"eta_days": None, "eta_date": None, "velocity": None}
+
+
+def week_window(start: date) -> Tuple[date, date]:
+    # Monday-based week
+    ws = start - timedelta(days=start.weekday())
+    we = ws + timedelta(days=6)
+    return ws, we
 
 
 def pick_from_list(
     label: str,
     key: str,
     values: List[str],
-    current: str = "",
-    require: bool = True,
-    list_key: str = "",
+    current: str,
+    require: bool = False,
+    list_key: Optional[str] = None,
 ) -> str:
-    values = [_norm(v) for v in (values or []) if _norm(v)]
-    cur = _norm(current)
+    """Select from a list with support for 'Add new...'."""
+    values = values or []
+    opts = list(values)
+    if not require:
+        opts = [""] + opts
+    opts = opts + [ADD_NEW]
 
-    if cur and cur not in values:
-        values = [cur] + values
-
-    options = values + [ADD_NEW] if values else [ADD_NEW]
-    idx = options.index(cur) if cur in options else 0
-
-    pick = st.selectbox(label, options=options, index=idx, key=key)
-
-    # FORM-SAFE: input always visible
-    new_key = f"{key}__new"
-    new_val = st.text_input(
-        f"{label} (new – nur wenn 'Add new...' gewählt)",
-        value=st.session_state.get(new_key, ""),
-        key=new_key,
-        placeholder=f"Neuen Wert für {label} eingeben …",
-    ).strip()
-
-    if pick == ADD_NEW:
-        if not new_val:
-            return "" if require else ""
-        new_val = _norm(new_val)
-        if list_key:
-            prev = list(st.session_state.lists.get(list_key, []) or [])
-            if new_val not in prev:
-                st.session_state.lists[list_key] = _list_union(prev, [new_val])
-                save_lists(
-                    st.session_state.lists.get("portfolios", []),
-                    st.session_state.lists.get("projects", []),
-                    st.session_state.lists.get("themes", []),
-                )
-                # Bug/UX fix: make it obvious that the new value was accepted.
-                # - select the new value on next rerun
-                # - clear the input field
-                # - store a small notice for feedback after submit
-                try:
-                    st.session_state[key] = new_val
-                except Exception:
-                    pass
-                try:
-                    st.session_state[new_key] = ""
-                except Exception:
-                    pass
-                st.session_state["_last_list_add"] = {"list_key": list_key, "value": new_val}
-        return new_val
-
-    return pick
-
-
-def pick_owner(
-    label: str,
-    key: str,
-    current_owner_id: str,
-    current_owner_display: str,
-    employees: List[Dict[str, Any]],
-) -> Tuple[str, str]:
-    """
-    Stable Owner picker used by ui_detail.py.
-    Returns: (owner_id, owner_display_name)
-    """
-    cur_id = str(current_owner_id or "").strip()
-    cur_name = str(current_owner_display or "").strip()
-
-    # build options
-    # map display_name -> id (if duplicates: first wins, but we also handle by id fallback)
-    opts: List[Tuple[str, str]] = []
-    for e in employees or []:
-        eid = str(e.get("id") or "").strip()
-        dn = str(e.get("display_name") or "").strip()
-        if not eid or not dn:
-            continue
-        opts.append((dn, eid))
-
-    # keep unique by (dn,eid)
-    seen = set()
-    uniq: List[Tuple[str, str]] = []
-    for dn, eid in opts:
-        k = (dn, eid)
-        if k in seen:
-            continue
-        seen.add(k)
-        uniq.append((dn, eid))
-    opts = uniq
-
-    # if current not in list, add it so UI stays stable
-    if cur_id and cur_name:
-        if (cur_name, cur_id) not in opts:
-            opts = [(cur_name, cur_id)] + opts
-
-    # always allow "no owner"
-    display_options = ["—"] + [dn for dn, _eid in opts]
-    # choose index based on current name if possible
-    if cur_name and cur_name in display_options:
-        idx = display_options.index(cur_name)
+    if current and current in opts:
+        idx = opts.index(current)
     else:
         idx = 0
 
-    picked_name = st.selectbox(label, options=display_options, index=idx, key=key)
-
-    if picked_name == "—":
-        return "", ""
-
-    # resolve picked name back to id (first match)
-    for dn, eid in opts:
-        if dn == picked_name:
-            return eid, dn
-
-    # fallback
-    return cur_id, picked_name
-
-
-
-def resolve_owner_id(owner_display: str, employees: List[Dict[str, Any]]) -> str:
-    owner_display = str(owner_display or "").strip()
-    if not owner_display:
-        return ""
-    for e in employees or []:
-        if str(e.get("display_name") or "").strip() == owner_display:
-            return str(e.get("id") or "").strip()
-    return ""
-
-
-def save_series(series_list: List[TaskSeries]) -> None:
-    # wrapper used by ui_admin.py
-    save_state(STATE_PATH, series_list)
-
-
-def safe_container(*, border: bool = True):
-    """Streamlit container wrapper that stays compatible across versions."""
-    try:
-        return st.container(border=border)
-    except TypeError:
-        return st.container()
-
-
-def segmented(label: str, options: List[str], default: str):
-    """Simple segmented control fallback (Streamlit versions differ)."""
-    options = list(options or [])
-    if not options:
-        return default
-    default = default if default in options else options[0]
-
-    for attr in ("segmented_control", "segmented"):
-        fn = getattr(st, attr, None)
-        if callable(fn):
-            try:
-                return fn(label, options, default=default)
-            except TypeError:
+    sel = st.selectbox(label, opts, index=idx, key=key)
+    if sel == ADD_NEW:
+        new_val = st.text_input(f"{label} (new – nur wenn 'Add new...' gewählt)", key=f"{key}_new")
+        if new_val and st.session_state.get(f"{key}_new_submit", False):
+            pass
+        # Enter-to-submit for text_input is handled by Streamlit rerun; we persist on non-empty.
+        if new_val and _norm(new_val):
+            v = _norm(new_val)
+            if list_key:
+                st.session_state.lists[list_key] = _list_union(st.session_state.lists.get(list_key, []), [v])
+                # persist lists
                 try:
-                    return fn(label, options, default)
+                    save_lists(st.session_state.lists)
                 except Exception:
-                    pass
+                    save_lists(
+                        st.session_state.lists.get("portfolios", []),
+                        st.session_state.lists.get("projects", []),
+                        st.session_state.lists.get("themes", []),
+                    )
+                st.session_state["_last_list_add"] = {"key": list_key, "value": v}
+            # Auto-select the newly created value on next rerun
+            st.session_state[key] = v
+            st.session_state[f"{key}_new"] = ""
+            st.rerun()
+        return ""
+    return sel
 
-    idx = options.index(default) if default in options else 0
-    try:
-        return st.radio(label, options, index=idx, horizontal=True)
-    except TypeError:
-        return st.radio(label, options, index=idx)
+
+def request_done_single(series_id: str, day: date) -> None:
+    reqs = st.session_state.get("done_requests", [])
+    reqs.append({"series_id": series_id, "day": day.isoformat()})
+    st.session_state.done_requests = reqs
 
 
-def week_window(today: date) -> Tuple[date, date]:
-    ws = today - timedelta(days=today.weekday())
-    we = ws + timedelta(days=6)
-    return ws, we
-
-
-def _business_days(ws: date, we: date) -> int:
-    d = ws
-    n = 0
-    while d <= we:
-        if d.weekday() < 5:
-            n += 1
+def request_done_grid(series_id: str, start_day: date, end_day: date) -> None:
+    d = start_day
+    while d <= end_day:
+        request_done_single(series_id, d)
         d += timedelta(days=1)
-    return n
-
-
-def capacity_summary(
-    tasks_all: List[TaskSeries],
-    employees: List[Dict[str, Any]],
-    today: date,
-    ws: Optional[date] = None,
-    we: Optional[date] = None,
-    window: str = "week",
-    default_capacity_per_day: float = 5.0,
-    **kwargs: Any,
-) -> Dict[str, Any]:
-    """Capacity summary wrapper used by ui_dashboard.py.
-
-    Why this exists:
-    - Older code called capacity_summary(tasks, employees, today, ws, we).
-    - Newer UI calls capacity_summary(..., window="week"|"month", default_capacity_per_day=...).
-
-    This wrapper supports both call styles and always returns the dict structure expected by ui_dashboard.py:
-    {
-      "window": "week"|"month"|"custom",
-      "window_start": <date>,
-      "window_end": <date>,
-      "by_employee": { employee_id: {...} }
-    }
-    """
-
-    # Accept common aliases without crashing (stability for UI modules)
-    for k in ("cap_per_day", "capacity_per_day", "default_cap_per_day", "default_capacity"):
-        if k in kwargs and kwargs[k] is not None:
-            try:
-                default_capacity_per_day = float(kwargs[k])
-            except Exception:
-                pass
-
-    # If the caller provides an explicit start/end window, use it (legacy call style).
-    if isinstance(ws, date) and isinstance(we, date):
-        win_start, win_end = ws, we
-        cap_days = max(1, _business_days(win_start, win_end))
-
-        emp_by_id: Dict[str, Dict[str, Any]] = {}
-        for e in employees or []:
-            eid = str(e.get("id") or "").strip()
-            if not eid:
-                continue
-            emp_by_id[eid] = {
-                "id": eid,
-                "name": str(e.get("display_name") or "").strip() or eid,
-            }
-
-        def units(s: TaskSeries) -> float:
-            try:
-                wv = float(getattr(s, "weight", 0.0) or 0.0)
-                return wv if wv > 0 else 1.0
-            except Exception:
-                return 1.0
-
-        by_emp: Dict[str, Dict[str, Any]] = {}
-        for eid, e in emp_by_id.items():
-            cap = float(cap_days) * float(default_capacity_per_day)
-            by_emp[eid] = {
-                "id": eid,
-                "name": e.get("name") or eid,
-                "window_start": win_start,
-                "window_end": win_end,
-                "capacity": cap,
-                "planned": 0.0,
-                "done": 0.0,
-                "remaining": 0.0,
-                "overdue": 0,
-                "utilization": 0.0,
-                "status": "green",
-                "tasks": [],
-            }
-
-        for s in tasks_all or []:
-            try:
-                if not is_task(s):
-                    continue
-                eid = str(getattr(s, "owner_id", "") or "").strip()
-                if not eid or eid not in by_emp:
-                    continue
-                if getattr(s, "end") < win_start or getattr(s, "start") > win_end:
-                    continue
-
-                u = units(s)
-                if not is_completed(s, today):
-                    by_emp[eid]["planned"] += u
-
-                dd = getattr(s, "done_days", set()) or set()
-                if isinstance(dd, set) and dd:
-                    sd = max(getattr(s, "start"), win_start)
-                    ed = min(getattr(s, "end"), win_end)
-
-                    full_bd = max(1, _business_days(getattr(s, "start"), getattr(s, "end")))
-                    per_day = float(u) / float(full_bd)
-
-                    d = sd
-                    while d <= ed:
-                        if d.weekday() < 5 and d in dd:
-                            by_emp[eid]["done"] += per_day
-                        d += timedelta(days=1)
-
-                if is_overdue(s, today):
-                    by_emp[eid]["overdue"] += 1
-
-                by_emp[eid]["tasks"].append(s)
-            except Exception:
-                continue
-
-        for _eid, row in by_emp.items():
-            planned = float(row["planned"])
-            done = float(row["done"])
-            remaining = max(0.0, planned - done)
-            row["remaining"] = remaining
-
-            cap = float(row["capacity"]) if float(row["capacity"]) > 0 else 1.0
-            util = planned / cap
-            row["utilization"] = util
-
-            if util < 0.85:
-                row["status"] = "green"
-            elif util < 1.10:
-                row["status"] = "yellow"
-            else:
-                row["status"] = "red"
-
-        return {
-            "window": "custom",
-            "window_start": win_start,
-            "window_end": win_end,
-            "by_employee": by_emp,
-        }
-
-    # Default path: delegate to the canonical implementation in core.py
-    return core_capacity_summary(
-        tasks_all,
-        employees=employees,
-        today=today,
-        window=window,
-        default_capacity_per_day=default_capacity_per_day,
-        **kwargs,
-    )
-
-
-
-def compute_done_composition(tasks: List[TaskSeries]):
-    return compute_units_composition(tasks)
-
-
-def forecast_eta(all_days, done_per_day, remaining_per_day, today: date, window_business_days: int = 10):
-    return forecast_eta_units(all_days, done_per_day, remaining_per_day, today, window_business_days)
-
-def request_done_single(series_id: str, day: date, reason: str = "") -> None:
-    st.session_state.done_requests = st.session_state.get("done_requests", [])
-    st.session_state.done_requests.append({"series_id": series_id, "day_iso": day.isoformat(), "reason": reason or ""})
-
-
-def request_done_grid(items: List[Dict[str, str]], reason: str = "") -> None:
-    st.session_state.done_requests = st.session_state.get("done_requests", [])
-    for it in items:
-        st.session_state.done_requests.append({"series_id": it["series_id"], "day_iso": it["day_iso"], "reason": reason})
 
 
 def handle_done_requests() -> None:
-    reqs = st.session_state.get("done_requests", [])
+    if "done_requests" not in st.session_state:
+        st.session_state.done_requests = []
+    reqs = st.session_state.done_requests
     if not reqs:
         return
     with st.sidebar.expander("✅ Quittierung nötig", expanded=True):
         st.caption("Es gibt DONE-Anfragen, die bestätigt werden müssen.")
         keep = []
         for i, r in enumerate(reqs):
-            sid = r.get("series_id", "")
-            day_iso = r.get("day_iso", "")
-            reason = r.get("reason", "")
+            sid = r.get("series_id")
+            day_iso = r.get("day")
             try:
                 s = find_series(sid)
             except Exception:
                 continue
+            reason = ""
+            if is_appointment(s):
+                reason = "Termin"
+            elif getattr(s, "is_meta", False):
+                reason = "META"
             row = st.columns([6, 2, 2])
             row[0].write(f"**{s.title}** · {day_iso}")
             if reason:
