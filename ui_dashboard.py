@@ -73,11 +73,12 @@ def render(ctx: Dict[str, Any]) -> None:
     if not by_emp:
         st.info("Keine Capacity-Daten.")
     else:
-        rows: List[Tuple[str, str, float, float, float, float, int]] = []
+        rows: List[Tuple[str, str, str, float, float, float, float, int]] = []
         for _eid, r in by_emp.items():
             rows.append(
                 (
                     _ampel(r.get("status")),
+                    str(_eid),
                     str(r.get("name") or ""),
                     float(r.get("utilization") or 0.0),
                     float(r.get("capacity") or 0.0),
@@ -89,14 +90,21 @@ def render(ctx: Dict[str, Any]) -> None:
 
         # sort: red first, then yellow, then green; within by util desc
         color_rank = {"🔴": 0, "🟡": 1, "🟢": 2}
-        rows.sort(key=lambda x: (color_rank.get(x[0], 9), -x[2], x[1].lower()))
+        # (ampel, eid, name, util, ...)
+        rows.sort(key=lambda x: (color_rank.get(x[0], 9), -x[3], x[2].lower()))
 
         st.caption("Klick auf einen Namen öffnet eine Liste der Tasks dieser Person (im Detail klickbar).")
 
-        for ampel, name, util, cap_u, planned, remaining, overdue in rows:
+        # allow "click name" -> expand tasks list for that employee
+        if "dash_open_emp" not in st.session_state:
+            st.session_state.dash_open_emp = ""
+
+        for ampel, eid, name, util, cap_u, planned, remaining, overdue in rows:
             left, mid, right = st.columns([3, 2, 4])
             with left:
-                st.markdown(f"**{ampel} {name}**")
+                # Name is clickable (opens the task list expander on the right)
+                if st.button(f"{ampel} {name}", key=f"dash_empbtn_{eid}"):
+                    st.session_state.dash_open_emp = eid
                 st.caption(f"Auslastung: {_pct(util)} · Overdue: {overdue}")
             with mid:
                 st.metric("Planned", round(planned, 2))
@@ -106,7 +114,10 @@ def render(ctx: Dict[str, Any]) -> None:
                 st.caption(f"Remaining: {round(remaining, 2)} units")
 
                 # quick list of tasks for this employee
-                with st.expander(f"Tasks von {name}", expanded=False):
+                with st.expander(
+                    f"Tasks von {name}",
+                    expanded=(str(st.session_state.get("dash_open_emp") or "") == str(eid)),
+                ):
                     # find employee id
                     # We only have name here; find first matching id in by_emp
                     # but better: list from tasks filter by owner display.

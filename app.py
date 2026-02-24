@@ -86,15 +86,125 @@ def _list_union(a: List[str], b: List[str]) -> List[str]:
 
 
 def load_employees() -> List[Dict[str, Any]]:
+    """Load employees from employees.json.
+
+    Historical compatibility:
+    - canonical: list[dict]
+    - some exports/imports: {"schema_version": 1, "employees": [...]}
+    - legacy/dirty: list[str] (names) or list[str(dict-repr)]
+
+    Output is normalized into: list[{id, display_name, aliases}]
+    """
+
+    def _slugify(s: str) -> str:
+        s = (s or "").strip().lower()
+        out = []
+        for ch in s:
+            if ch.isalnum():
+                out.append(ch)
+            else:
+                out.append("_")
+        v = "".join(out).strip("_")
+        while "__" in v:
+            v = v.replace("__", "_")
+        return v or "unknown"
+
+    def _maybe_parse_dict_string(s: str) -> Dict[str, Any] | None:
+        """Best-effort parse of a string that looks like a dict (python or json)."""
+        s = (s or "").strip()
+        if not (s.startswith("{") and s.endswith("}")):
+            return None
+        # Try JSON first
+        try:
+            d = json.loads(s)
+            if isinstance(d, dict):
+                return d
+        except Exception:
+            pass
+        # Try python literal
+        try:
+            import ast
+
+            d = ast.literal_eval(s)
+            if isinstance(d, dict):
+                return d
+        except Exception:
+            pass
+        return None
+
     if not EMP_PATH.exists():
         return []
+
     try:
-        data = json.loads(EMP_PATH.read_text(encoding="utf-8"))
-        if isinstance(data, list):
-            return data
+        raw = json.loads(EMP_PATH.read_text(encoding="utf-8", errors="replace"))
     except Exception:
-        pass
-    return []
+        return []
+
+    # unwrap schema container if present
+    if isinstance(raw, dict) and isinstance(raw.get("employees"), list):
+        raw_list = raw.get("employees", [])
+    elif isinstance(raw, list):
+        raw_list = raw
+    else:
+        raw_list = []
+
+    cleaned: List[Dict[str, Any]] = []
+    seen = set()
+
+    for item in raw_list:
+        try:
+            # item can be dict or string
+            if isinstance(item, str):
+                # could be a dict-repr string
+                d = _maybe_parse_dict_string(item)
+                if isinstance(d, dict):
+                    item = d
+                else:
+                    name = _norm(item)
+                    if not name:
+                        continue
+                    eid = _slugify(name)
+                    if eid in seen:
+                        continue
+                    seen.add(eid)
+                    cleaned.append({"id": eid, "display_name": name, "aliases": [name]})
+                    continue
+
+            if not isinstance(item, dict):
+                continue
+
+            # Some broken states had display_name containing the whole dict as a string.
+            # Try to recover it.
+            dn_raw = str(item.get("display_name", "") or "").strip()
+            if dn_raw.startswith("{") and "display_name" in dn_raw:
+                d2 = _maybe_parse_dict_string(dn_raw)
+                if isinstance(d2, dict):
+                    item = d2
+                    dn_raw = str(item.get("display_name", "") or "").strip()
+
+            dn = _norm(dn_raw)
+            if not dn:
+                continue
+            eid = str(item.get("id", "") or "").strip() or _slugify(dn)
+            if eid.lower() == "none":
+                eid = _slugify(dn)
+            if eid in seen:
+                continue
+            seen.add(eid)
+
+            aliases = item.get("aliases", [])
+            if not isinstance(aliases, list):
+                aliases = []
+            aliases = [_norm(str(a)) for a in aliases if _norm(str(a))]
+            if dn and dn not in aliases:
+                aliases = [dn] + aliases
+
+            cleaned.append({"id": eid, "display_name": dn, "aliases": aliases})
+        except Exception:
+            continue
+
+    cleaned.sort(key=lambda x: (str(x.get("display_name") or "").lower()))
+    return cleaned
 
 
 def save_employees(employees: List[Dict[str, Any]]) -> None:
