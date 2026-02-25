@@ -88,12 +88,12 @@ def _list_union(a: List[str], b: List[str]) -> List[str]:
 def load_employees() -> List[Dict[str, Any]]:
     """Load employees from employees.json.
 
-    Historical compatibility:
+    Compatibility:
     - canonical: list[dict]
-    - some exports/imports: {"schema_version": 1, "employees": [...]}
+    - container: {"schema_version": 1, "employees": [...]}
     - legacy/dirty: list[str] (names) or list[str(dict-repr)]
 
-    Output is normalized into: list[{id, display_name, aliases}]
+    Output: list[{id, display_name, aliases}]
     """
 
     def _slugify(s: str) -> str:
@@ -110,18 +110,15 @@ def load_employees() -> List[Dict[str, Any]]:
         return v or "unknown"
 
     def _maybe_parse_dict_string(s: str) -> Dict[str, Any] | None:
-        """Best-effort parse of a string that looks like a dict (python or json)."""
         s = (s or "").strip()
         if not (s.startswith("{") and s.endswith("}")):
             return None
-        # Try JSON first
         try:
             d = json.loads(s)
             if isinstance(d, dict):
                 return d
         except Exception:
             pass
-        # Try python literal
         try:
             import ast
 
@@ -140,7 +137,6 @@ def load_employees() -> List[Dict[str, Any]]:
     except Exception:
         return []
 
-    # unwrap schema container if present
     if isinstance(raw, dict) and isinstance(raw.get("employees"), list):
         raw_list = raw.get("employees", [])
     elif isinstance(raw, list):
@@ -153,9 +149,7 @@ def load_employees() -> List[Dict[str, Any]]:
 
     for item in raw_list:
         try:
-            # item can be dict or string
             if isinstance(item, str):
-                # could be a dict-repr string
                 d = _maybe_parse_dict_string(item)
                 if isinstance(d, dict):
                     item = d
@@ -173,8 +167,6 @@ def load_employees() -> List[Dict[str, Any]]:
             if not isinstance(item, dict):
                 continue
 
-            # Some broken states had display_name containing the whole dict as a string.
-            # Try to recover it.
             dn_raw = str(item.get("display_name", "") or "").strip()
             if dn_raw.startswith("{") and "display_name" in dn_raw:
                 d2 = _maybe_parse_dict_string(dn_raw)
@@ -185,6 +177,7 @@ def load_employees() -> List[Dict[str, Any]]:
             dn = _norm(dn_raw)
             if not dn:
                 continue
+
             eid = str(item.get("id", "") or "").strip() or _slugify(dn)
             if eid.lower() == "none":
                 eid = _slugify(dn)
@@ -228,13 +221,6 @@ def load_lists() -> Dict[str, List[str]]:
 
 
 def _extract_list_values(x: Any) -> List[str]:
-    """Normalize list inputs coming from UI editors.
-
-    Accepts:
-      - list[str]
-      - list[dict] with key 'value' (e.g., st.data_editor rows)
-      - None
-    """
     if x is None:
         return []
     if isinstance(x, list):
@@ -259,7 +245,7 @@ def _extract_list_values(x: Any) -> List[str]:
 def save_lists(*args, **kwargs) -> None:
     """Persist portfolios/projects/themes.
 
-    Backwards compatible with both call styles:
+    Supports both:
       1) save_lists(portfolios, projects, themes)
       2) save_lists({"portfolios": ..., "projects": ..., "themes": ...})
     """
@@ -359,17 +345,13 @@ def appointment_label(s: TaskSeries) -> str:
 
 
 def pick_owner(label: str, key: str, current_owner: str = "") -> Tuple[str, str]:
-    """Owner picker returning (display_name, owner_id)."""
     employees = st.session_state.employees
     names = [e.get("display_name", "") for e in employees if e.get("display_name")]
     names = [n for n in names if n]
     if not names:
         st.selectbox(label, ["—"], index=0, key=key)
         return "—", ""
-    if current_owner and current_owner in names:
-        idx = names.index(current_owner)
-    else:
-        idx = 0
+    idx = names.index(current_owner) if current_owner in names else 0
     picked = st.selectbox(label, names, index=idx, key=key)
     owner_id = ""
     for e in employees:
@@ -397,23 +379,22 @@ def capacity_summary(
     tasks: List[TaskSeries],
     window: Tuple[date, date] | None = None,
     default_capacity_per_day: float = 5.0,
+    employees: Any = None,  # <-- UI passes this; we don't need it here.
     ws: Optional[date] = None,
     we: Optional[date] = None,
+    **_ignored: Any,  # <-- ignore future/extra keywords safely
 ) -> Dict[str, Any]:
     """Compatibility wrapper around core.capacity_summary.
 
-    New UI calls:
-      capacity_summary(tasks, window=(ws,we), default_capacity_per_day=..)
+    UI variants:
+      - capacity_summary(tasks, window=(ws,we), employees=..., default_capacity_per_day=..)
+      - older call sites might pass ws/we separately
 
-    Old call sites might still pass:
-      capacity_summary(tasks, ws, we, default_capacity_per_day)
-
-    This wrapper keeps both working and always returns a dict as expected by ui_dashboard.py.
+    This wrapper keeps both working and returns the dict structure expected by ui_dashboard.py.
     """
     if window is None and ws is not None and we is not None:
         window = (ws, we)
 
-    # Fall back to "week from today" if nothing is provided.
     if window is None:
         ws0 = date.today()
         we0 = ws0 + timedelta(days=6)
@@ -426,7 +407,6 @@ def capacity_summary(
             default_capacity_per_day=float(default_capacity_per_day),
         )
     except TypeError:
-        # Extremely defensive: if core changes, provide a stable minimal structure
         ws2, we2 = window
         return {
             "window": (ws2, we2),
@@ -447,7 +427,6 @@ def delete_series(series_id: str) -> None:
 
 
 def save_series(series: TaskSeries) -> None:
-    # Replace by id
     sid = getattr(series, "id", "")
     for i, s in enumerate(st.session_state.series):
         if getattr(s, "id", "") == sid:
@@ -457,8 +436,7 @@ def save_series(series: TaskSeries) -> None:
 
 
 def safe_container(n: int = 1):
-    cols = st.columns(n)
-    return cols
+    return st.columns(n)
 
 
 def segmented(options: List[str], key: str, default: str) -> str:
@@ -469,7 +447,6 @@ def segmented(options: List[str], key: str, default: str) -> str:
 
 
 def compute_done_composition(series: TaskSeries, today: date) -> Dict[str, float]:
-    # Units composition helper
     parts = getattr(series, "parts", []) or []
     if not parts:
         return {"done": 0.0, "open": 0.0}
@@ -488,7 +465,6 @@ def compute_done_composition(series: TaskSeries, today: date) -> Dict[str, float
 
 
 def forecast_eta(series: TaskSeries, today: date) -> Dict[str, Any]:
-    # Wrapper with safe output schema for ui_data
     try:
         return forecast_eta_units(series, today=today)
     except Exception:
@@ -496,7 +472,6 @@ def forecast_eta(series: TaskSeries, today: date) -> Dict[str, Any]:
 
 
 def week_window(start: date) -> Tuple[date, date]:
-    # Monday-based week
     ws = start - timedelta(days=start.weekday())
     we = ws + timedelta(days=6)
     return ws, we
@@ -510,29 +485,21 @@ def pick_from_list(
     require: bool = False,
     list_key: Optional[str] = None,
 ) -> str:
-    """Select from a list with support for 'Add new...'."""
     values = values or []
     opts = list(values)
     if not require:
         opts = [""] + opts
     opts = opts + [ADD_NEW]
 
-    if current and current in opts:
-        idx = opts.index(current)
-    else:
-        idx = 0
-
+    idx = opts.index(current) if current in opts else 0
     sel = st.selectbox(label, opts, index=idx, key=key)
+
     if sel == ADD_NEW:
         new_val = st.text_input(f"{label} (new – nur wenn 'Add new...' gewählt)", key=f"{key}_new")
-        if new_val and st.session_state.get(f"{key}_new_submit", False):
-            pass
-        # Enter-to-submit for text_input is handled by Streamlit rerun; we persist on non-empty.
         if new_val and _norm(new_val):
             v = _norm(new_val)
             if list_key:
                 st.session_state.lists[list_key] = _list_union(st.session_state.lists.get(list_key, []), [v])
-                # persist lists
                 try:
                     save_lists(st.session_state.lists)
                 except Exception:
@@ -542,7 +509,6 @@ def pick_from_list(
                         st.session_state.lists.get("themes", []),
                     )
                 st.session_state["_last_list_add"] = {"key": list_key, "value": v}
-            # Auto-select the newly created value on next rerun
             st.session_state[key] = v
             st.session_state[f"{key}_new"] = ""
             st.rerun()
@@ -579,15 +545,8 @@ def handle_done_requests() -> None:
                 s = find_series(sid)
             except Exception:
                 continue
-            reason = ""
-            if is_appointment(s):
-                reason = "Termin"
-            elif getattr(s, "is_meta", False):
-                reason = "META"
             row = st.columns([6, 2, 2])
             row[0].write(f"**{s.title}** · {day_iso}")
-            if reason:
-                row[0].caption(reason)
             if row[1].button(
                 "✅ Quittieren",
                 key=f"done_ok_{i}_{sid}_{day_iso}",
@@ -629,7 +588,7 @@ if "initialized" not in st.session_state:
 
 today = date.today()
 
-# ------------------ Sidebar (header + quick stats) ------------------
+# ------------------ Sidebar stats ------------------
 
 st.sidebar.title(APP_TITLE)
 
@@ -653,8 +612,6 @@ c4.metric("Meta", k_meta)
 
 handle_done_requests()
 
-# One-shot feedback when a new list value was created via 'Add new...' inputs.
-# This fixes the "created but not visible/confirmed" confusion without changing any flows.
 _notice = st.session_state.pop("_last_list_add", None)
 if isinstance(_notice, dict) and _notice.get("value"):
     try:
@@ -696,7 +653,6 @@ else:
     cur_code = st.session_state.page if st.session_state.page in code_to_display else "HOME"
     cur_disp = code_to_display.get(cur_code, display_options[0])
 
-# IMPORTANT: session_state drives the selectbox default (no index/value)
 if "nav_select" not in st.session_state:
     st.session_state["nav_select"] = cur_disp
 
@@ -745,13 +701,28 @@ with st.sidebar.expander("Quick add (task)", expanded=False):
                 break
 
     qa_project = pick_from_list(
-        "Project", key="qa_project", values=st.session_state.lists.get("projects", []), current="", require=True, list_key="projects"
+        "Project",
+        key="qa_project",
+        values=st.session_state.lists.get("projects", []),
+        current="",
+        require=True,
+        list_key="projects",
     )
     qa_theme = pick_from_list(
-        "Theme", key="qa_theme", values=st.session_state.lists.get("themes", []), current="General", require=True, list_key="themes"
+        "Theme",
+        key="qa_theme",
+        values=st.session_state.lists.get("themes", []),
+        current="General",
+        require=True,
+        list_key="themes",
     )
     qa_portfolio = pick_from_list(
-        "Portfolio", key="qa_portfolio", values=st.session_state.lists.get("portfolios", []), current="Default", require=True, list_key="portfolios"
+        "Portfolio",
+        key="qa_portfolio",
+        values=st.session_state.lists.get("portfolios", []),
+        current="Default",
+        require=True,
+        list_key="portfolios",
     )
 
     qa_days = st.number_input("Duration (days)", min_value=1, max_value=30, value=5, step=1, key="qa_days")
@@ -786,7 +757,7 @@ with st.sidebar.expander("Quick add (task)", expanded=False):
         else:
             st.warning("Title required.")
 
-# ------------------ Page render context ------------------
+# ------------------ Context for UI modules ------------------
 
 ctx = {
     "today": today,
@@ -814,7 +785,7 @@ ctx = {
     "unmark_done": unmark_done,
     "appointment_label": appointment_label,
     "pick_from_list": pick_from_list,
-    "pick_owner": pick_owner,  # ✅ FIX: required by ui_detail.py
+    "pick_owner": pick_owner,
     "request_done_single": request_done_single,
     "request_done_grid": request_done_grid,
     "employees": st.session_state.employees,
@@ -824,21 +795,18 @@ ctx = {
     "build_burndown_series": build_burndown_series,
     "calc_velocity": calc_velocity,
     "forecast_finish_date": forecast_finish_date,
-
-    # REQUIRED by ui_data.py
-    
-"series": st.session_state.series,
-"save_series": save_series,
-"save_employees": save_employees,
-"save_lists": save_lists,
-"resolve_owner_id": resolve_owner_id,
-"safe_container": safe_container,
-"segmented": segmented,
-"compute_done_composition": compute_done_composition,
-"forecast_eta": forecast_eta,
-"week_window": week_window,
-"forecast_eta_units": forecast_eta_units,
-"DATA_FILE": str(STATE_PATH),
+    "series": st.session_state.series,
+    "save_series": save_series,
+    "save_employees": save_employees,
+    "save_lists": save_lists,
+    "resolve_owner_id": resolve_owner_id,
+    "safe_container": safe_container,
+    "segmented": segmented,
+    "compute_done_composition": compute_done_composition,
+    "forecast_eta": forecast_eta,
+    "week_window": week_window,
+    "forecast_eta_units": forecast_eta_units,
+    "DATA_FILE": str(STATE_PATH),
     "EMP_FILE": str(EMP_PATH),
     "LISTS_FILE": str(LISTS_PATH),
 }
