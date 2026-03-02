@@ -473,7 +473,11 @@ def render(ctx: dict) -> None:
     labels = []
     lookup = {}
     for sid, d in items:
-        s = find_series(sid)
+        try:
+            s = find_series(sid)
+        except KeyError:
+            # stale reference (series removed/changed) -> skip instead of crashing
+            continue
         lab = f"{d.isoformat()} · {s.title}"
         labels.append(lab)
         lookup[lab] = {"series_id": sid, "day_iso": d.isoformat()}
