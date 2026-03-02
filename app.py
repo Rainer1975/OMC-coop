@@ -20,7 +20,7 @@ from core import (
     build_burndown_series,
     calc_velocity,
     can_depend_series,
-    capacity_summary as core_capacity_summary,
+    capacity_summary as core_capacity_summary,  # <-- THIS is the ampel function
     compute_units_composition,
     forecast_eta_units,
     forecast_finish_date,
@@ -377,59 +377,69 @@ def resolve_owner_id(owner_name: str) -> str:
 
 
 def capacity_summary(
-    tasks: List[TaskSeries],
-    window: Any = None,
-    default_capacity_per_day: float = 5.0,
+    series_list: List[TaskSeries],
     employees: Any = None,
-    ws: Optional[date] = None,
-    we: Optional[date] = None,
-    **_ignored: Any,
+    today: Any = None,
+    window: Any = "week",
+    default_capacity_per_day: float = 5.0,
+    **kwargs: Any,
 ) -> Dict[str, Any]:
-    today = date.today()
+    """
+    Backward/forward compatible wrapper.
 
-    if ws is not None and we is not None:
-        window = (ws, we)
+    IMPORTANT:
+    The Ampel overview in ui_dashboard.py depends on core.capacity_summary()
+    which returns {"by_employee": ...}.
 
-    if isinstance(window, str):
-        w = window.lower().strip()
-        if w == "week":
-            start = today - timedelta(days=today.weekday())
-            end = start + timedelta(days=6)
-            window = (start, end)
-        elif w == "month":
-            start = today.replace(day=1)
-            if start.month == 12:
-                end = start.replace(year=start.year + 1, month=1, day=1) - timedelta(days=1)
-            else:
-                end = start.replace(month=start.month + 1, day=1) - timedelta(days=1)
-            window = (start, end)
-        else:
-            window = None
+    core.capacity_summary signature:
+      capacity_summary(series_list, employees, today, window="week|month", default_capacity_per_day=.., **kwargs)
 
-    if not isinstance(window, tuple) or len(window) != 2:
-        start = today - timedelta(days=today.weekday())
-        end = start + timedelta(days=6)
-        window = (start, end)
+    UI calls may pass different kw names -> we normalize and forward.
+    """
+    # normalize employees/today if not passed
+    if employees is None:
+        employees = st.session_state.get("employees", [])
+    if today is None:
+        today = date.today()
 
+    # normalize window
+    w = window
+    if isinstance(w, tuple) and len(w) == 2:
+        # a tuple window was passed by some older wrapper; map to week (core needs string)
+        w = "week"
+    if not isinstance(w, str):
+        w = "week"
+    w = (w or "week").lower().strip()
+    if w not in ("week", "month"):
+        w = "week"
+
+    # accept alias names for capacity per day
+    for k in ("cap_per_day", "capacity_per_day", "default_cap_per_day", "default_capacity"):
+        if k in kwargs and kwargs[k] is not None:
+            try:
+                default_capacity_per_day = float(kwargs[k])
+            except Exception:
+                pass
+
+    # forward to core (this restores by_employee + status/ampel)
     try:
         return core_capacity_summary(
-            tasks=tasks,
-            window=window,
+            series_list=series_list,
+            employees=employees,
+            today=today,
+            window=w,
             default_capacity_per_day=float(default_capacity_per_day),
+            **kwargs,
         )
-    except Exception:
-        ws2, we2 = window
-        return {
-            "window": (ws2, we2),
-            "by_owner": {},
-            "totals": {
-                "capacity": 0.0,
-                "planned": 0.0,
-                "remaining": 0.0,
-                "pct": 0.0,
-                "overdue": 0,
-            },
-        }
+    except TypeError:
+        # if called positionally by some legacy code, try a minimal call
+        return core_capacity_summary(
+            series_list,
+            employees,
+            today,
+            w,
+            float(default_capacity_per_day),
+        )
 
 
 def delete_series(series_id: str) -> None:
@@ -802,7 +812,7 @@ ctx = {
     "request_done_grid": request_done_grid,
     "employees": st.session_state.employees,
     "lists": st.session_state.lists,
-    "capacity_summary": capacity_summary,
+    "capacity_summary": capacity_summary,  # <-- restored proper ampel output
     "compute_units_composition": compute_units_composition,
     "build_burndown_series": build_burndown_series,
     "calc_velocity": calc_velocity,
@@ -826,7 +836,7 @@ ctx = {
 # ------------------ Main render ------------------
 
 if st.session_state.page == "DETAIL":
-    # FIX: open_series kann auf eine nicht mehr existente ID zeigen -> niemals crashen
+    # never crash if open_series is stale
     open_id = st.session_state.open_series
     if not open_id:
         st.warning("No item selected.")
@@ -837,7 +847,6 @@ if st.session_state.page == "DETAIL":
         try:
             _ = find_series(open_id)
         except KeyError:
-            # ungültige ID: zurücksetzen und sauber zurück
             st.session_state.open_series = None
             st.session_state.page = "HOME"
             st.session_state.nav_force_sync = True
