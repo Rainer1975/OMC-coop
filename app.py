@@ -7,23 +7,23 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import matplotlib.dates as mdates  # kept
-import matplotlib.pyplot as plt  # kept
-import pandas as pd  # kept
-import plotly.graph_objects as go  # kept
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
+import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 from core import (
     TaskPart,
     TaskSeries,
     bulk_set_done,
+    can_depend_series,
+    capacity_summary as core_capacity_summary,
+    compute_units_composition,
     build_burndown_series,
     calc_velocity,
-    can_depend_series,
-    capacity_summary as core_capacity_summary,  # <-- THIS is the ampel function
-    compute_units_composition,
-    forecast_eta_units,
     forecast_finish_date,
+    forecast_eta_units,
     gantt_items,
     is_active,
     is_appointment,
@@ -74,7 +74,7 @@ def _list_union(a: List[str], b: List[str]) -> List[str]:
     out: List[str] = []
     seen = set()
     for x in (a or []) + (b or []):
-        x = _norm(str(x))
+        x = _norm(x)
         if not x:
             continue
         k = x.lower()
@@ -86,38 +86,42 @@ def _list_union(a: List[str], b: List[str]) -> List[str]:
 
 
 def load_employees() -> List[Dict[str, Any]]:
-    """
-    Load employees from employees.json.
+    """Load employees from employees.json.
 
-    Compatibility:
-      - canonical: list[dict]
-      - container: {"schema_version": 1, "employees": [...]}
-      - legacy/dirty: list[str] (names) or list[str(dict-repr)]
-      - broken state: display_name accidentally contains dict-repr string
+    Historical compatibility:
+    - canonical: list[dict]
+    - some exports/imports: {"schema_version": 1, "employees": [...]}
+    - legacy/dirty: list[str] (names) or list[str(dict-repr)]
 
-    Output normalized into: list[{id, display_name, aliases}]
+    Output is normalized into: list[{id, display_name, aliases}]
     """
 
     def _slugify(s: str) -> str:
         s = (s or "").strip().lower()
         out = []
         for ch in s:
-            out.append(ch if ch.isalnum() else "_")
+            if ch.isalnum():
+                out.append(ch)
+            else:
+                out.append("_")
         v = "".join(out).strip("_")
         while "__" in v:
             v = v.replace("__", "_")
         return v or "unknown"
 
     def _maybe_parse_dict_string(s: str) -> Dict[str, Any] | None:
+        """Best-effort parse of a string that looks like a dict (python or json)."""
         s = (s or "").strip()
         if not (s.startswith("{") and s.endswith("}")):
             return None
+        # Try JSON first
         try:
             d = json.loads(s)
             if isinstance(d, dict):
                 return d
         except Exception:
             pass
+        # Try python literal
         try:
             import ast
 
@@ -136,6 +140,7 @@ def load_employees() -> List[Dict[str, Any]]:
     except Exception:
         return []
 
+    # unwrap schema container if present
     if isinstance(raw, dict) and isinstance(raw.get("employees"), list):
         raw_list = raw.get("employees", [])
     elif isinstance(raw, list):
@@ -144,11 +149,13 @@ def load_employees() -> List[Dict[str, Any]]:
         raw_list = []
 
     cleaned: List[Dict[str, Any]] = []
-    seen: set[str] = set()
+    seen = set()
 
     for item in raw_list:
         try:
+            # item can be dict or string
             if isinstance(item, str):
+                # could be a dict-repr string
                 d = _maybe_parse_dict_string(item)
                 if isinstance(d, dict):
                     item = d
@@ -166,8 +173,9 @@ def load_employees() -> List[Dict[str, Any]]:
             if not isinstance(item, dict):
                 continue
 
+            # Some broken states had display_name containing the whole dict as a string.
+            # Try to recover it.
             dn_raw = str(item.get("display_name", "") or "").strip()
-
             if dn_raw.startswith("{") and "display_name" in dn_raw:
                 d2 = _maybe_parse_dict_string(dn_raw)
                 if isinstance(d2, dict):
@@ -177,7 +185,6 @@ def load_employees() -> List[Dict[str, Any]]:
             dn = _norm(dn_raw)
             if not dn:
                 continue
-
             eid = str(item.get("id", "") or "").strip() or _slugify(dn)
             if eid.lower() == "none":
                 eid = _slugify(dn)
@@ -213,7 +220,7 @@ def load_lists() -> Dict[str, List[str]]:
             out = dict(DEFAULT_LISTS)
             for k in DEFAULT_LISTS:
                 if k in data and isinstance(data[k], list):
-                    out[k] = [_norm(str(x)) for x in data[k] if _norm(str(x))]
+                    out[k] = [_norm(x) for x in data[k] if _norm(x)]
             return out
     except Exception:
         pass
@@ -221,34 +228,40 @@ def load_lists() -> Dict[str, List[str]]:
 
 
 def _extract_list_values(x: Any) -> List[str]:
-    if x is None:
+    """Normalize list inputs coming from UI editors.
+
+    Accepts:
+      - list[str]
+      - list[dict] with key 'value' (e.g., st.data_editor rows)
+      - None
+    """    if x is None:
         return []
     if isinstance(x, list):
         out: List[str] = []
         for item in x:
             if isinstance(item, dict):
                 v = item.get("value")
-                v = _norm(str(v)) if v is not None else ""
+                if v is None:
+                    continue
+                v = _norm(v)
                 if v:
                     out.append(v)
             else:
-                v = _norm(str(item))
+                v = _norm(item)
                 if v:
                     out.append(v)
         return out
-    v = _norm(str(x))
+    v = _norm(x)
     return [v] if v else []
 
 
 def save_lists(*args, **kwargs) -> None:
-    """
-    Persist portfolios/projects/themes.
+    """Persist portfolios/projects/themes.
 
-    Supports both call styles:
+    Backwards compatible with both call styles:
       1) save_lists(portfolios, projects, themes)
       2) save_lists({"portfolios": ..., "projects": ..., "themes": ...})
-    """
-    portfolios: List[str] = []
+    """    portfolios: List[str] = []
     projects: List[str] = []
     themes: List[str] = []
 
@@ -274,6 +287,7 @@ def save_lists(*args, **kwargs) -> None:
     LISTS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+
 def persist() -> None:
     save_state(STATE_PATH, st.session_state.series)
 
@@ -282,7 +296,6 @@ def sync_lists_from_data() -> None:
     portfolios = set()
     projects = set()
     themes = set()
-
     for s in st.session_state.series:
         portfolios.add(_norm(getattr(s, "portfolio", "") or "Default") or "Default")
         if _norm(getattr(s, "project", "")):
@@ -293,7 +306,6 @@ def sync_lists_from_data() -> None:
     st.session_state.lists["portfolios"] = _list_union(["Default"], sorted(portfolios))
     st.session_state.lists["projects"] = _list_union([], sorted(projects))
     st.session_state.lists["themes"] = _list_union(["General", "Termin"], sorted(themes))
-
     save_lists(
         st.session_state.lists.get("portfolios", []),
         st.session_state.lists.get("projects", []),
@@ -302,7 +314,8 @@ def sync_lists_from_data() -> None:
 
 
 def open_detail(series_id: str) -> None:
-    st.session_state.open_series = series_id
+    # normalize to string to avoid int-vs-str mismatches across UI modules
+    st.session_state.open_series = str(series_id)
     st.session_state.page_prev = st.session_state.page
     st.session_state.nav_select_before_detail = st.session_state.get("nav_select")
     st.session_state.page = "DETAIL"
@@ -319,101 +332,263 @@ def close_detail() -> None:
 
 
 def find_series(series_id: str) -> TaskSeries:
-    for s in st.session_state.series:
-        if getattr(s, "id", "") == series_id:
-            return s
-    raise KeyError(series_id)
+    """Find a series by id.
+
+    IDs can show up as int/str depending on source (import/UI). Normalize to str
+    so clicks don't mis-resolve and bounce back to HOME.
+    """
+    sid = str(series_id)
+    for x in st.session_state.series:
+        if str(getattr(x, "series_id", "")) == sid:
+            return x
+    raise KeyError(sid)
+
+
+def delete_series(series_id: str) -> None:
+    sid = str(series_id)
+    st.session_state.series = [x for x in st.session_state.series if str(getattr(x, "series_id", "")) != sid]
+    persist()
+
+
+def appointment_label(s: TaskSeries) -> str:
+    ts = (getattr(s, "time_start", "") or "").strip()
+    te = (getattr(s, "time_end", "") or "").strip()
+    loc = (getattr(s, "location", "") or "").strip()
+    parts = []
+    if ts and te:
+        parts.append(f"{ts}–{te}")
+    elif ts:
+        parts.append(ts)
+    if loc:
+        parts.append(loc)
+    suffix = (" · " + " · ".join(parts)) if parts else ""
+    return f"{s.title}{suffix}"
 
 
 def visible_series() -> List[TaskSeries]:
     out: List[TaskSeries] = []
     for s in st.session_state.series:
-        if st.session_state.get("focus_mode", False):
+        if st.session_state.focus_mode:
             if getattr(s, "is_meta", False):
                 continue
             if is_appointment(s):
-                continue
-            if is_task(s) and not is_active(s):
                 continue
         out.append(s)
     return out
 
 
-def appointment_label(s: TaskSeries) -> str:
-    owner = getattr(s, "owner", "") or "—"
-    proj = getattr(s, "project", "") or "—"
-    return f"{owner} · {proj}"
+def pick_from_list(
+    label: str,
+    key: str,
+    values: List[str],
+    current: str = "",
+    require: bool = True,
+    list_key: str = "",
+) -> str:
+    values = [_norm(v) for v in (values or []) if _norm(v)]
+    cur = _norm(current)
+
+    if cur and cur not in values:
+        values = [cur] + values
+
+    options = values + [ADD_NEW] if values else [ADD_NEW]
+    idx = options.index(cur) if cur in options else 0
+
+    pick = st.selectbox(label, options=options, index=idx, key=key)
+
+    # FORM-SAFE: input always visible
+    new_key = f"{key}__new"
+    new_val = st.text_input(
+        f"{label} (new – nur wenn 'Add new...' gewählt)",
+        value=st.session_state.get(new_key, ""),
+        key=new_key,
+        placeholder=f"Neuen Wert für {label} eingeben …",
+    ).strip()
+
+    if pick == ADD_NEW:
+        if not new_val:
+            return "" if require else ""
+        new_val = _norm(new_val)
+        if list_key:
+            prev = list(st.session_state.lists.get(list_key, []) or [])
+            if new_val not in prev:
+                st.session_state.lists[list_key] = _list_union(prev, [new_val])
+                save_lists(
+                    st.session_state.lists.get("portfolios", []),
+                    st.session_state.lists.get("projects", []),
+                    st.session_state.lists.get("themes", []),
+                )
+                # Bug/UX fix: make it obvious that the new value was accepted.
+                # - select the new value on next rerun
+                # - clear the input field
+                # - store a small notice for feedback after submit
+                try:
+                    st.session_state[key] = new_val
+                except Exception:
+                    pass
+                try:
+                    st.session_state[new_key] = ""
+                except Exception:
+                    pass
+                st.session_state["_last_list_add"] = {"list_key": list_key, "value": new_val}
+        return new_val
+
+    return pick
 
 
-def pick_owner(label: str, key: str, current_owner: str = "") -> Tuple[str, str]:
-    employees = st.session_state.employees
-    names = [e.get("display_name", "") for e in employees if e.get("display_name")]
-    names = [n for n in names if n]
-    if not names:
-        st.selectbox(label, ["—"], index=0, key=key)
-        return "—", ""
-    idx = names.index(current_owner) if current_owner in names else 0
-    picked = st.selectbox(label, names, index=idx, key=key)
-    owner_id = ""
-    for e in employees:
-        if e.get("display_name") == picked:
-            owner_id = str(e.get("id") or "")
-            break
-    return picked, owner_id
+def pick_owner(
+    label: str,
+    key: str,
+    current_owner_id: str,
+    current_owner_display: str,
+    employees: List[Dict[str, Any]],
+) -> Tuple[str, str]:
+    """
+    Stable Owner picker used by ui_detail.py.
+    Returns: (owner_id, owner_display_name)
+    """
+    cur_id = str(current_owner_id or "").strip()
+    cur_name = str(current_owner_display or "").strip()
+
+    # build options
+    # map display_name -> id (if duplicates: first wins, but we also handle by id fallback)
+    opts: List[Tuple[str, str]] = []
+    for e in employees or []:
+        eid = str(e.get("id") or "").strip()
+        dn = str(e.get("display_name") or "").strip()
+        if not eid or not dn:
+            continue
+        opts.append((dn, eid))
+
+    # keep unique by (dn,eid)
+    seen = set()
+    uniq: List[Tuple[str, str]] = []
+    for dn, eid in opts:
+        k = (dn, eid)
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append((dn, eid))
+    opts = uniq
+
+    # if current not in list, add it so UI stays stable
+    if cur_id and cur_name:
+        if (cur_name, cur_id) not in opts:
+            opts = [(cur_name, cur_id)] + opts
+
+    # always allow "no owner"
+    display_options = ["—"] + [dn for dn, _eid in opts]
+    # choose index based on current name if possible
+    if cur_name and cur_name in display_options:
+        idx = display_options.index(cur_name)
+    else:
+        idx = 0
+
+    picked_name = st.selectbox(label, options=display_options, index=idx, key=key)
+
+    if picked_name == "—":
+        return "", ""
+
+    # resolve picked name back to id (first match)
+    for dn, eid in opts:
+        if dn == picked_name:
+            return eid, dn
+
+    # fallback
+    return cur_id, picked_name
 
 
-def resolve_owner_id(owner_name: str) -> str:
-    owner_name = _norm(owner_name)
-    if not owner_name:
+
+def resolve_owner_id(owner_display: str, employees: List[Dict[str, Any]]) -> str:
+    owner_display = str(owner_display or "").strip()
+    if not owner_display:
         return ""
-    for e in st.session_state.employees:
-        if _norm(e.get("display_name", "")) == owner_name:
-            return str(e.get("id") or "")
-        aliases = e.get("aliases", []) or []
-        for a in aliases:
-            if _norm(str(a)) == owner_name:
-                return str(e.get("id") or "")
+    for e in employees or []:
+        if str(e.get("display_name") or "").strip() == owner_display:
+            return str(e.get("id") or "").strip()
     return ""
 
 
+def save_series(series_list: List[TaskSeries]) -> None:
+    # wrapper used by ui_admin.py
+    save_state(STATE_PATH, series_list)
+
+
+def safe_container(*, border: bool = True):
+    """Streamlit container wrapper that stays compatible across versions."""
+    try:
+        return st.container(border=border)
+    except TypeError:
+        return st.container()
+
+
+def segmented(label: str, options: List[str], default: str):
+    """Simple segmented control fallback (Streamlit versions differ)."""
+    options = list(options or [])
+    if not options:
+        return default
+    default = default if default in options else options[0]
+
+    for attr in ("segmented_control", "segmented"):
+        fn = getattr(st, attr, None)
+        if callable(fn):
+            try:
+                return fn(label, options, default=default)
+            except TypeError:
+                try:
+                    return fn(label, options, default)
+                except Exception:
+                    pass
+
+    idx = options.index(default) if default in options else 0
+    try:
+        return st.radio(label, options, index=idx, horizontal=True)
+    except TypeError:
+        return st.radio(label, options, index=idx)
+
+
+def week_window(today: date) -> Tuple[date, date]:
+    ws = today - timedelta(days=today.weekday())
+    we = ws + timedelta(days=6)
+    return ws, we
+
+
+def _business_days(ws: date, we: date) -> int:
+    d = ws
+    n = 0
+    while d <= we:
+        if d.weekday() < 5:
+            n += 1
+        d += timedelta(days=1)
+    return n
+
+
 def capacity_summary(
-    series_list: List[TaskSeries],
-    employees: Any = None,
-    today: Any = None,
-    window: Any = "week",
+    tasks_all: List[TaskSeries],
+    employees: List[Dict[str, Any]],
+    today: date,
+    ws: Optional[date] = None,
+    we: Optional[date] = None,
+    window: str = "week",
     default_capacity_per_day: float = 5.0,
     **kwargs: Any,
 ) -> Dict[str, Any]:
+    """Capacity summary wrapper used by ui_dashboard.py.
+
+    Why this exists:
+    - Older code called capacity_summary(tasks, employees, today, ws, we).
+    - Newer UI calls capacity_summary(..., window="week"|"month", default_capacity_per_day=...).
+
+    This wrapper supports both call styles and always returns the dict structure expected by ui_dashboard.py:
+    {
+      "window": "week"|"month"|"custom",
+      "window_start": <date>,
+      "window_end": <date>,
+      "by_employee": { employee_id: {...} }
+    }
     """
-    Backward/forward compatible wrapper.
 
-    IMPORTANT:
-    The Ampel overview in ui_dashboard.py depends on core.capacity_summary()
-    which returns {"by_employee": ...}.
-
-    core.capacity_summary signature:
-      capacity_summary(series_list, employees, today, window="week|month", default_capacity_per_day=.., **kwargs)
-
-    UI calls may pass different kw names -> we normalize and forward.
-    """
-    # normalize employees/today if not passed
-    if employees is None:
-        employees = st.session_state.get("employees", [])
-    if today is None:
-        today = date.today()
-
-    # normalize window
-    w = window
-    if isinstance(w, tuple) and len(w) == 2:
-        # a tuple window was passed by some older wrapper; map to week (core needs string)
-        w = "week"
-    if not isinstance(w, str):
-        w = "week"
-    w = (w or "week").lower().strip()
-    if w not in ("week", "month"):
-        w = "week"
-
-    # accept alias names for capacity per day
+    # Accept common aliases without crashing (stability for UI modules)
     for k in ("cap_per_day", "capacity_per_day", "default_cap_per_day", "default_capacity"):
         if k in kwargs and kwargs[k] is not None:
             try:
@@ -421,156 +596,154 @@ def capacity_summary(
             except Exception:
                 pass
 
-    # forward to core (this restores by_employee + status/ampel)
-    try:
-        return core_capacity_summary(
-            series_list=series_list,
-            employees=employees,
-            today=today,
-            window=w,
-            default_capacity_per_day=float(default_capacity_per_day),
-            **kwargs,
-        )
-    except TypeError:
-        # if called positionally by some legacy code, try a minimal call
-        return core_capacity_summary(
-            series_list,
-            employees,
-            today,
-            w,
-            float(default_capacity_per_day),
-        )
+    # If the caller provides an explicit start/end window, use it (legacy call style).
+    if isinstance(ws, date) and isinstance(we, date):
+        win_start, win_end = ws, we
+        cap_days = max(1, _business_days(win_start, win_end))
+
+        emp_by_id: Dict[str, Dict[str, Any]] = {}
+        for e in employees or []:
+            eid = str(e.get("id") or "").strip()
+            if not eid:
+                continue
+            emp_by_id[eid] = {
+                "id": eid,
+                "name": str(e.get("display_name") or "").strip() or eid,
+            }
+
+        def units(s: TaskSeries) -> float:
+            try:
+                wv = float(getattr(s, "weight", 0.0) or 0.0)
+                return wv if wv > 0 else 1.0
+            except Exception:
+                return 1.0
+
+        by_emp: Dict[str, Dict[str, Any]] = {}
+        for eid, e in emp_by_id.items():
+            cap = float(cap_days) * float(default_capacity_per_day)
+            by_emp[eid] = {
+                "id": eid,
+                "name": e.get("name") or eid,
+                "window_start": win_start,
+                "window_end": win_end,
+                "capacity": cap,
+                "planned": 0.0,
+                "done": 0.0,
+                "remaining": 0.0,
+                "overdue": 0,
+                "utilization": 0.0,
+                "status": "green",
+                "tasks": [],
+            }
+
+        for s in tasks_all or []:
+            try:
+                if not is_task(s):
+                    continue
+                eid = str(getattr(s, "owner_id", "") or "").strip()
+                if not eid or eid not in by_emp:
+                    continue
+                if getattr(s, "end") < win_start or getattr(s, "start") > win_end:
+                    continue
+
+                u = units(s)
+                if not is_completed(s, today):
+                    by_emp[eid]["planned"] += u
+
+                dd = getattr(s, "done_days", set()) or set()
+                if isinstance(dd, set) and dd:
+                    sd = max(getattr(s, "start"), win_start)
+                    ed = min(getattr(s, "end"), win_end)
+
+                    full_bd = max(1, _business_days(getattr(s, "start"), getattr(s, "end")))
+                    per_day = float(u) / float(full_bd)
+
+                    d = sd
+                    while d <= ed:
+                        if d.weekday() < 5 and d in dd:
+                            by_emp[eid]["done"] += per_day
+                        d += timedelta(days=1)
+
+                if is_overdue(s, today):
+                    by_emp[eid]["overdue"] += 1
+
+                by_emp[eid]["tasks"].append(s)
+            except Exception:
+                continue
+
+        for _eid, row in by_emp.items():
+            planned = float(row["planned"])
+            done = float(row["done"])
+            remaining = max(0.0, planned - done)
+            row["remaining"] = remaining
+
+            cap = float(row["capacity"]) if float(row["capacity"]) > 0 else 1.0
+            util = planned / cap
+            row["utilization"] = util
+
+            if util < 0.85:
+                row["status"] = "green"
+            elif util < 1.10:
+                row["status"] = "yellow"
+            else:
+                row["status"] = "red"
+
+        return {
+            "window": "custom",
+            "window_start": win_start,
+            "window_end": win_end,
+            "by_employee": by_emp,
+        }
+
+    # Default path: delegate to the canonical implementation in core.py
+    return core_capacity_summary(
+        tasks_all,
+        employees=employees,
+        today=today,
+        window=window,
+        default_capacity_per_day=default_capacity_per_day,
+        **kwargs,
+    )
 
 
-def delete_series(series_id: str) -> None:
-    st.session_state.series = [s for s in st.session_state.series if getattr(s, "id", "") != series_id]
-    persist()
+
+def compute_done_composition(tasks: List[TaskSeries]):
+    return compute_units_composition(tasks)
 
 
-def save_series(series: TaskSeries) -> None:
-    sid = getattr(series, "id", "")
-    for i, s in enumerate(st.session_state.series):
-        if getattr(s, "id", "") == sid:
-            st.session_state.series[i] = series
-            break
-    persist()
+def forecast_eta(all_days, done_per_day, remaining_per_day, today: date, window_business_days: int = 10):
+    return forecast_eta_units(all_days, done_per_day, remaining_per_day, today, window_business_days)
+
+def request_done_single(series_id: str, day: date, reason: str = "") -> None:
+    st.session_state.done_requests = st.session_state.get("done_requests", [])
+    st.session_state.done_requests.append({"series_id": series_id, "day_iso": day.isoformat(), "reason": reason or ""})
 
 
-def safe_container(n: int = 1):
-    return st.columns(n)
-
-
-def segmented(options: List[str], key: str, default: str) -> str:
-    if default not in options:
-        default = options[0]
-    idx = options.index(default)
-    return st.radio("", options, horizontal=True, index=idx, key=key)
-
-
-def compute_done_composition(series: TaskSeries, today: date) -> Dict[str, float]:
-    parts = getattr(series, "parts", []) or []
-    if not parts:
-        return {"done": 0.0, "open": 0.0}
-    done = 0.0
-    open_u = 0.0
-    for p in parts:
-        try:
-            w = float(getattr(p, "weight", 0.0) or 0.0)
-        except Exception:
-            w = 0.0
-        if getattr(p, "done", False):
-            done += w
-        else:
-            open_u += w
-    return {"done": done, "open": open_u}
-
-
-def forecast_eta(series: TaskSeries, today: date) -> Dict[str, Any]:
-    try:
-        return forecast_eta_units(series, today=today)
-    except Exception:
-        return {"eta_days": None, "eta_date": None, "velocity": None}
-
-
-def week_window(start: date) -> Tuple[date, date]:
-    ws = start - timedelta(days=start.weekday())
-    we = ws + timedelta(days=6)
-    return ws, we
-
-
-def pick_from_list(
-    label: str,
-    key: str,
-    values: List[str],
-    current: str,
-    require: bool = False,
-    list_key: Optional[str] = None,
-) -> str:
-    values = values or []
-    opts = list(values)
-    if not require:
-        opts = [""] + opts
-    opts = opts + [ADD_NEW]
-
-    idx = opts.index(current) if current in opts else 0
-    sel = st.selectbox(label, opts, index=idx, key=key)
-
-    if sel == ADD_NEW:
-        new_val = st.text_input(f"{label} (new – nur wenn 'Add new...' gewählt)", key=f"{key}_new")
-        if new_val and _norm(new_val):
-            v = _norm(new_val)
-            if list_key:
-                st.session_state.lists[list_key] = _list_union(st.session_state.lists.get(list_key, []), [v])
-                try:
-                    save_lists(st.session_state.lists)
-                except Exception:
-                    save_lists(
-                        st.session_state.lists.get("portfolios", []),
-                        st.session_state.lists.get("projects", []),
-                        st.session_state.lists.get("themes", []),
-                    )
-                st.session_state["_last_list_add"] = {"key": list_key, "value": v}
-            st.session_state[key] = v
-            st.session_state[f"{key}_new"] = ""
-            st.rerun()
-        return ""
-    return sel
-
-
-def request_done_single(series_id: str, day: date) -> None:
-    reqs = st.session_state.get("done_requests", [])
-    reqs.append({"series_id": series_id, "day": day.isoformat()})
-    st.session_state.done_requests = reqs
-
-
-def request_done_grid(series_id: str, start_day: date, end_day: date) -> None:
-    d = start_day
-    while d <= end_day:
-        request_done_single(series_id, d)
-        d += timedelta(days=1)
+def request_done_grid(items: List[Dict[str, str]], reason: str = "") -> None:
+    st.session_state.done_requests = st.session_state.get("done_requests", [])
+    for it in items:
+        st.session_state.done_requests.append({"series_id": it["series_id"], "day_iso": it["day_iso"], "reason": reason})
 
 
 def handle_done_requests() -> None:
-    if "done_requests" not in st.session_state:
-        st.session_state.done_requests = []
-    reqs = st.session_state.done_requests
+    reqs = st.session_state.get("done_requests", [])
     if not reqs:
         return
-
     with st.sidebar.expander("✅ Quittierung nötig", expanded=True):
         st.caption("Es gibt DONE-Anfragen, die bestätigt werden müssen.")
         keep = []
         for i, r in enumerate(reqs):
-            sid = r.get("series_id")
-            day_iso = r.get("day")
+            sid = r.get("series_id", "")
+            day_iso = r.get("day_iso", "")
+            reason = r.get("reason", "")
             try:
                 s = find_series(sid)
             except Exception:
                 continue
-
             row = st.columns([6, 2, 2])
             row[0].write(f"**{s.title}** · {day_iso}")
-
+            if reason:
+                row[0].caption(reason)
             if row[1].button(
                 "✅ Quittieren",
                 key=f"done_ok_{i}_{sid}_{day_iso}",
@@ -588,7 +761,6 @@ def handle_done_requests() -> None:
                 pass
             else:
                 keep.append(r)
-
         st.session_state.done_requests = keep
 
 
@@ -613,7 +785,7 @@ if "initialized" not in st.session_state:
 
 today = date.today()
 
-# ------------------ Sidebar stats ------------------
+# ------------------ Sidebar (header + quick stats) ------------------
 
 st.sidebar.title(APP_TITLE)
 
@@ -637,6 +809,8 @@ c4.metric("Meta", k_meta)
 
 handle_done_requests()
 
+# One-shot feedback when a new list value was created via 'Add new...' inputs.
+# This fixes the "created but not visible/confirmed" confusion without changing any flows.
 _notice = st.session_state.pop("_last_list_add", None)
 if isinstance(_notice, dict) and _notice.get("value"):
     try:
@@ -678,6 +852,7 @@ else:
     cur_code = st.session_state.page if st.session_state.page in code_to_display else "HOME"
     cur_disp = code_to_display.get(cur_code, display_options[0])
 
+# IMPORTANT: session_state drives the selectbox default (no index/value)
 if "nav_select" not in st.session_state:
     st.session_state["nav_select"] = cur_disp
 
@@ -707,13 +882,16 @@ if picked_page != st.session_state.page:
         st.session_state.open_series = None
     st.rerun()
 
-# ------------------ Quick add ------------------
-
 with st.sidebar.expander("Quick add (task)", expanded=False):
     qa_title = st.text_input("Title", key="qa_title")
 
     owner_names = [e.get("display_name", "") for e in st.session_state.employees if e.get("display_name")]
-    qa_owner = st.selectbox("Owner", options=owner_names if owner_names else ["—"], index=0, key="qa_owner")
+    qa_owner = st.selectbox(
+        "Owner",
+        options=owner_names if owner_names else ["—"],
+        index=0,
+        key="qa_owner",
+    )
 
     qa_owner_id = ""
     if qa_owner != "—":
@@ -723,28 +901,13 @@ with st.sidebar.expander("Quick add (task)", expanded=False):
                 break
 
     qa_project = pick_from_list(
-        "Project",
-        key="qa_project",
-        values=st.session_state.lists.get("projects", []),
-        current="",
-        require=True,
-        list_key="projects",
+        "Project", key="qa_project", values=st.session_state.lists.get("projects", []), current="", require=True, list_key="projects"
     )
     qa_theme = pick_from_list(
-        "Theme",
-        key="qa_theme",
-        values=st.session_state.lists.get("themes", []),
-        current="General",
-        require=True,
-        list_key="themes",
+        "Theme", key="qa_theme", values=st.session_state.lists.get("themes", []), current="General", require=True, list_key="themes"
     )
     qa_portfolio = pick_from_list(
-        "Portfolio",
-        key="qa_portfolio",
-        values=st.session_state.lists.get("portfolios", []),
-        current="Default",
-        require=True,
-        list_key="portfolios",
+        "Portfolio", key="qa_portfolio", values=st.session_state.lists.get("portfolios", []), current="Default", require=True, list_key="portfolios"
     )
 
     qa_days = st.number_input("Duration (days)", min_value=1, max_value=30, value=5, step=1, key="qa_days")
@@ -779,7 +942,7 @@ with st.sidebar.expander("Quick add (task)", expanded=False):
         else:
             st.warning("Title required.")
 
-# ------------------ Context for UI modules ------------------
+# ------------------ Page render context ------------------
 
 ctx = {
     "today": today,
@@ -807,28 +970,31 @@ ctx = {
     "unmark_done": unmark_done,
     "appointment_label": appointment_label,
     "pick_from_list": pick_from_list,
-    "pick_owner": pick_owner,
+    "pick_owner": pick_owner,  # ✅ FIX: required by ui_detail.py
     "request_done_single": request_done_single,
     "request_done_grid": request_done_grid,
     "employees": st.session_state.employees,
     "lists": st.session_state.lists,
-    "capacity_summary": capacity_summary,  # <-- restored proper ampel output
+    "capacity_summary": capacity_summary,
     "compute_units_composition": compute_units_composition,
     "build_burndown_series": build_burndown_series,
     "calc_velocity": calc_velocity,
     "forecast_finish_date": forecast_finish_date,
-    "series": st.session_state.series,
-    "save_series": save_series,
-    "save_employees": save_employees,
-    "save_lists": save_lists,
-    "resolve_owner_id": resolve_owner_id,
-    "safe_container": safe_container,
-    "segmented": segmented,
-    "compute_done_composition": compute_done_composition,
-    "forecast_eta": forecast_eta,
-    "week_window": week_window,
-    "forecast_eta_units": forecast_eta_units,
-    "DATA_FILE": str(STATE_PATH),
+
+    # REQUIRED by ui_data.py
+    
+"series": st.session_state.series,
+"save_series": save_series,
+"save_employees": save_employees,
+"save_lists": save_lists,
+"resolve_owner_id": resolve_owner_id,
+"safe_container": safe_container,
+"segmented": segmented,
+"compute_done_composition": compute_done_composition,
+"forecast_eta": forecast_eta,
+"week_window": week_window,
+"forecast_eta_units": forecast_eta_units,
+"DATA_FILE": str(STATE_PATH),
     "EMP_FILE": str(EMP_PATH),
     "LISTS_FILE": str(LISTS_PATH),
 }
@@ -836,21 +1002,12 @@ ctx = {
 # ------------------ Main render ------------------
 
 if st.session_state.page == "DETAIL":
-    # never crash if open_series is stale
-    open_id = st.session_state.open_series
-    if not open_id:
+    if not st.session_state.open_series:
         st.warning("No item selected.")
         st.session_state.page = "HOME"
         st.session_state.nav_force_sync = True
         st.rerun()
     else:
-        try:
-            _ = find_series(open_id)
-        except KeyError:
-            st.session_state.open_series = None
-            st.session_state.page = "HOME"
-            st.session_state.nav_force_sync = True
-            st.rerun()
         render_detail(ctx)
 elif st.session_state.page == "HOME":
     render_home(ctx)
