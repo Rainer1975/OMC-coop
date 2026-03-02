@@ -7,7 +7,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import matplotlib.dates as mdates  # kept (used in some UI modules historically)
+import matplotlib.dates as mdates  # kept
 import matplotlib.pyplot as plt  # kept
 import pandas as pd  # kept
 import plotly.graph_objects as go  # kept
@@ -112,14 +112,12 @@ def load_employees() -> List[Dict[str, Any]]:
         s = (s or "").strip()
         if not (s.startswith("{") and s.endswith("}")):
             return None
-        # JSON first
         try:
             d = json.loads(s)
             if isinstance(d, dict):
                 return d
         except Exception:
             pass
-        # Python literal
         try:
             import ast
 
@@ -150,7 +148,6 @@ def load_employees() -> List[Dict[str, Any]]:
 
     for item in raw_list:
         try:
-            # string cases
             if isinstance(item, str):
                 d = _maybe_parse_dict_string(item)
                 if isinstance(d, dict):
@@ -171,7 +168,6 @@ def load_employees() -> List[Dict[str, Any]]:
 
             dn_raw = str(item.get("display_name", "") or "").strip()
 
-            # repair: display_name contains dict-repr
             if dn_raw.startswith("{") and "display_name" in dn_raw:
                 d2 = _maybe_parse_dict_string(dn_raw)
                 if isinstance(d2, dict):
@@ -225,14 +221,6 @@ def load_lists() -> Dict[str, List[str]]:
 
 
 def _extract_list_values(x: Any) -> List[str]:
-    """
-    Normalize list inputs coming from UI editors.
-
-    Accepts:
-      - list[str]
-      - list[dict] with key 'value' (st.data_editor rows)
-      - None / scalar
-    """
     if x is None:
         return []
     if isinstance(x, list):
@@ -306,7 +294,6 @@ def sync_lists_from_data() -> None:
     st.session_state.lists["projects"] = _list_union([], sorted(projects))
     st.session_state.lists["themes"] = _list_union(["General", "Termin"], sorted(themes))
 
-    # persist lists file
     save_lists(
         st.session_state.lists.get("portfolios", []),
         st.session_state.lists.get("projects", []),
@@ -359,7 +346,6 @@ def appointment_label(s: TaskSeries) -> str:
 
 
 def pick_owner(label: str, key: str, current_owner: str = "") -> Tuple[str, str]:
-    """Owner picker returning (display_name, owner_id)."""
     employees = st.session_state.employees
     names = [e.get("display_name", "") for e in employees if e.get("display_name")]
     names = [n for n in names if n]
@@ -394,26 +380,16 @@ def capacity_summary(
     tasks: List[TaskSeries],
     window: Any = None,
     default_capacity_per_day: float = 5.0,
-    employees: Any = None,  # accepted/ignored (ui passes it)
+    employees: Any = None,
     ws: Optional[date] = None,
     we: Optional[date] = None,
-    **_ignored: Any,  # accept/ignore future extra kwargs
+    **_ignored: Any,
 ) -> Dict[str, Any]:
-    """
-    Ultra-robuster Wrapper für ui_dashboard.
-    Akzeptiert:
-      - window als (date, date)
-      - window als 'week' / 'month'
-      - ws/we separat
-      - employees (wird ignoriert)
-    """
     today = date.today()
 
-    # ws/we override
     if ws is not None and we is not None:
         window = (ws, we)
 
-    # window string support
     if isinstance(window, str):
         w = window.lower().strip()
         if w == "week":
@@ -430,13 +406,11 @@ def capacity_summary(
         else:
             window = None
 
-    # validate window
     if not isinstance(window, tuple) or len(window) != 2:
         start = today - timedelta(days=today.weekday())
         end = start + timedelta(days=6)
         window = (start, end)
 
-    # core call
     try:
         return core_capacity_summary(
             tasks=tasks,
@@ -546,7 +520,6 @@ def pick_from_list(
                         st.session_state.lists.get("themes", []),
                     )
                 st.session_state["_last_list_add"] = {"key": list_key, "value": v}
-            # auto-select new value
             st.session_state[key] = v
             st.session_state[f"{key}_new"] = ""
             st.rerun()
@@ -654,7 +627,6 @@ c4.metric("Meta", k_meta)
 
 handle_done_requests()
 
-# one-shot feedback for list add
 _notice = st.session_state.pop("_last_list_add", None)
 if isinstance(_notice, dict) and _notice.get("value"):
     try:
@@ -854,12 +826,22 @@ ctx = {
 # ------------------ Main render ------------------
 
 if st.session_state.page == "DETAIL":
-    if not st.session_state.open_series:
+    # FIX: open_series kann auf eine nicht mehr existente ID zeigen -> niemals crashen
+    open_id = st.session_state.open_series
+    if not open_id:
         st.warning("No item selected.")
         st.session_state.page = "HOME"
         st.session_state.nav_force_sync = True
         st.rerun()
     else:
+        try:
+            _ = find_series(open_id)
+        except KeyError:
+            # ungültige ID: zurücksetzen und sauber zurück
+            st.session_state.open_series = None
+            st.session_state.page = "HOME"
+            st.session_state.nav_force_sync = True
+            st.rerun()
         render_detail(ctx)
 elif st.session_state.page == "HOME":
     render_home(ctx)
