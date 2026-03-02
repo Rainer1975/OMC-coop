@@ -74,7 +74,7 @@ def _list_union(a: List[str], b: List[str]) -> List[str]:
     out: List[str] = []
     seen = set()
     for x in (a or []) + (b or []):
-        x = _norm(x)
+        x = _norm(str(x))
         if not x:
             continue
         k = x.lower()
@@ -220,7 +220,7 @@ def load_lists() -> Dict[str, List[str]]:
             out = dict(DEFAULT_LISTS)
             for k in DEFAULT_LISTS:
                 if k in data and isinstance(data[k], list):
-                    out[k] = [_norm(x) for x in data[k] if _norm(x)]
+                    out[k] = [_norm(str(x)) for x in data[k] if _norm(str(x))]
             return out
     except Exception:
         pass
@@ -234,7 +234,8 @@ def _extract_list_values(x: Any) -> List[str]:
       - list[str]
       - list[dict] with key 'value' (e.g., st.data_editor rows)
       - None
-    """    if x is None:
+    """
+    if x is None:
         return []
     if isinstance(x, list):
         out: List[str] = []
@@ -243,15 +244,15 @@ def _extract_list_values(x: Any) -> List[str]:
                 v = item.get("value")
                 if v is None:
                     continue
-                v = _norm(v)
+                v = _norm(str(v))
                 if v:
                     out.append(v)
             else:
-                v = _norm(item)
+                v = _norm(str(item))
                 if v:
                     out.append(v)
         return out
-    v = _norm(x)
+    v = _norm(str(x))
     return [v] if v else []
 
 
@@ -261,7 +262,8 @@ def save_lists(*args, **kwargs) -> None:
     Backwards compatible with both call styles:
       1) save_lists(portfolios, projects, themes)
       2) save_lists({"portfolios": ..., "projects": ..., "themes": ...})
-    """    portfolios: List[str] = []
+    """
+    portfolios: List[str] = []
     projects: List[str] = []
     themes: List[str] = []
 
@@ -285,7 +287,6 @@ def save_lists(*args, **kwargs) -> None:
         "themes": _list_union(["General", "Termin"], themes),
     }
     LISTS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
 
 
 def persist() -> None:
@@ -314,7 +315,6 @@ def sync_lists_from_data() -> None:
 
 
 def open_detail(series_id: str) -> None:
-    # normalize to string to avoid int-vs-str mismatches across UI modules
     st.session_state.open_series = str(series_id)
     st.session_state.page_prev = st.session_state.page
     st.session_state.nav_select_before_detail = st.session_state.get("nav_select")
@@ -334,19 +334,22 @@ def close_detail() -> None:
 def find_series(series_id: str) -> TaskSeries:
     """Find a series by id.
 
-    IDs can show up as int/str depending on source (import/UI). Normalize to str
-    so clicks don't mis-resolve and bounce back to HOME.
+    IDs can show up as int/str depending on source (import/UI). Normalize to str.
     """
     sid = str(series_id)
     for x in st.session_state.series:
-        if str(getattr(x, "series_id", "")) == sid:
+        # tolerate both attribute names without changing behavior elsewhere
+        if str(getattr(x, "series_id", getattr(x, "id", ""))) == sid:
             return x
     raise KeyError(sid)
 
 
 def delete_series(series_id: str) -> None:
     sid = str(series_id)
-    st.session_state.series = [x for x in st.session_state.series if str(getattr(x, "series_id", "")) != sid]
+    st.session_state.series = [
+        x for x in st.session_state.series
+        if str(getattr(x, "series_id", getattr(x, "id", ""))) != sid
+    ]
     persist()
 
 
@@ -385,8 +388,8 @@ def pick_from_list(
     require: bool = True,
     list_key: str = "",
 ) -> str:
-    values = [_norm(v) for v in (values or []) if _norm(v)]
-    cur = _norm(current)
+    values = [_norm(str(v)) for v in (values or []) if _norm(str(v))]
+    cur = _norm(str(current))
 
     if cur and cur not in values:
         values = [cur] + values
@@ -396,7 +399,6 @@ def pick_from_list(
 
     pick = st.selectbox(label, options=options, index=idx, key=key)
 
-    # FORM-SAFE: input always visible
     new_key = f"{key}__new"
     new_val = st.text_input(
         f"{label} (new – nur wenn 'Add new...' gewählt)",
@@ -418,10 +420,6 @@ def pick_from_list(
                     st.session_state.lists.get("projects", []),
                     st.session_state.lists.get("themes", []),
                 )
-                # Bug/UX fix: make it obvious that the new value was accepted.
-                # - select the new value on next rerun
-                # - clear the input field
-                # - store a small notice for feedback after submit
                 try:
                     st.session_state[key] = new_val
                 except Exception:
@@ -450,8 +448,6 @@ def pick_owner(
     cur_id = str(current_owner_id or "").strip()
     cur_name = str(current_owner_display or "").strip()
 
-    # build options
-    # map display_name -> id (if duplicates: first wins, but we also handle by id fallback)
     opts: List[Tuple[str, str]] = []
     for e in employees or []:
         eid = str(e.get("id") or "").strip()
@@ -460,7 +456,6 @@ def pick_owner(
             continue
         opts.append((dn, eid))
 
-    # keep unique by (dn,eid)
     seen = set()
     uniq: List[Tuple[str, str]] = []
     for dn, eid in opts:
@@ -471,32 +466,23 @@ def pick_owner(
         uniq.append((dn, eid))
     opts = uniq
 
-    # if current not in list, add it so UI stays stable
     if cur_id and cur_name:
         if (cur_name, cur_id) not in opts:
             opts = [(cur_name, cur_id)] + opts
 
-    # always allow "no owner"
     display_options = ["—"] + [dn for dn, _eid in opts]
-    # choose index based on current name if possible
-    if cur_name and cur_name in display_options:
-        idx = display_options.index(cur_name)
-    else:
-        idx = 0
+    idx = display_options.index(cur_name) if cur_name and cur_name in display_options else 0
 
     picked_name = st.selectbox(label, options=display_options, index=idx, key=key)
 
     if picked_name == "—":
         return "", ""
 
-    # resolve picked name back to id (first match)
     for dn, eid in opts:
         if dn == picked_name:
             return eid, dn
 
-    # fallback
     return cur_id, picked_name
-
 
 
 def resolve_owner_id(owner_display: str, employees: List[Dict[str, Any]]) -> str:
@@ -510,12 +496,10 @@ def resolve_owner_id(owner_display: str, employees: List[Dict[str, Any]]) -> str
 
 
 def save_series(series_list: List[TaskSeries]) -> None:
-    # wrapper used by ui_admin.py
     save_state(STATE_PATH, series_list)
 
 
 def safe_container(*, border: bool = True):
-    """Streamlit container wrapper that stays compatible across versions."""
     try:
         return st.container(border=border)
     except TypeError:
@@ -523,7 +507,6 @@ def safe_container(*, border: bool = True):
 
 
 def segmented(label: str, options: List[str], default: str):
-    """Simple segmented control fallback (Streamlit versions differ)."""
     options = list(options or [])
     if not options:
         return default
@@ -573,22 +556,7 @@ def capacity_summary(
     default_capacity_per_day: float = 5.0,
     **kwargs: Any,
 ) -> Dict[str, Any]:
-    """Capacity summary wrapper used by ui_dashboard.py.
-
-    Why this exists:
-    - Older code called capacity_summary(tasks, employees, today, ws, we).
-    - Newer UI calls capacity_summary(..., window="week"|"month", default_capacity_per_day=...).
-
-    This wrapper supports both call styles and always returns the dict structure expected by ui_dashboard.py:
-    {
-      "window": "week"|"month"|"custom",
-      "window_start": <date>,
-      "window_end": <date>,
-      "by_employee": { employee_id: {...} }
-    }
-    """
-
-    # Accept common aliases without crashing (stability for UI modules)
+    """Capacity summary wrapper used by ui_dashboard.py."""
     for k in ("cap_per_day", "capacity_per_day", "default_cap_per_day", "default_capacity"):
         if k in kwargs and kwargs[k] is not None:
             try:
@@ -596,7 +564,6 @@ def capacity_summary(
             except Exception:
                 pass
 
-    # If the caller provides an explicit start/end window, use it (legacy call style).
     if isinstance(ws, date) and isinstance(we, date):
         win_start, win_end = ws, we
         cap_days = max(1, _business_days(win_start, win_end))
@@ -695,7 +662,6 @@ def capacity_summary(
             "by_employee": by_emp,
         }
 
-    # Default path: delegate to the canonical implementation in core.py
     return core_capacity_summary(
         tasks_all,
         employees=employees,
@@ -706,13 +672,13 @@ def capacity_summary(
     )
 
 
-
 def compute_done_composition(tasks: List[TaskSeries]):
     return compute_units_composition(tasks)
 
 
 def forecast_eta(all_days, done_per_day, remaining_per_day, today: date, window_business_days: int = 10):
     return forecast_eta_units(all_days, done_per_day, remaining_per_day, today, window_business_days)
+
 
 def request_done_single(series_id: str, day: date, reason: str = "") -> None:
     st.session_state.done_requests = st.session_state.get("done_requests", [])
@@ -809,8 +775,6 @@ c4.metric("Meta", k_meta)
 
 handle_done_requests()
 
-# One-shot feedback when a new list value was created via 'Add new...' inputs.
-# This fixes the "created but not visible/confirmed" confusion without changing any flows.
 _notice = st.session_state.pop("_last_list_add", None)
 if isinstance(_notice, dict) and _notice.get("value"):
     try:
@@ -852,7 +816,6 @@ else:
     cur_code = st.session_state.page if st.session_state.page in code_to_display else "HOME"
     cur_disp = code_to_display.get(cur_code, display_options[0])
 
-# IMPORTANT: session_state drives the selectbox default (no index/value)
 if "nav_select" not in st.session_state:
     st.session_state["nav_select"] = cur_disp
 
@@ -901,13 +864,28 @@ with st.sidebar.expander("Quick add (task)", expanded=False):
                 break
 
     qa_project = pick_from_list(
-        "Project", key="qa_project", values=st.session_state.lists.get("projects", []), current="", require=True, list_key="projects"
+        "Project",
+        key="qa_project",
+        values=st.session_state.lists.get("projects", []),
+        current="",
+        require=True,
+        list_key="projects",
     )
     qa_theme = pick_from_list(
-        "Theme", key="qa_theme", values=st.session_state.lists.get("themes", []), current="General", require=True, list_key="themes"
+        "Theme",
+        key="qa_theme",
+        values=st.session_state.lists.get("themes", []),
+        current="General",
+        require=True,
+        list_key="themes",
     )
     qa_portfolio = pick_from_list(
-        "Portfolio", key="qa_portfolio", values=st.session_state.lists.get("portfolios", []), current="Default", require=True, list_key="portfolios"
+        "Portfolio",
+        key="qa_portfolio",
+        values=st.session_state.lists.get("portfolios", []),
+        current="Default",
+        require=True,
+        list_key="portfolios",
     )
 
     qa_days = st.number_input("Duration (days)", min_value=1, max_value=30, value=5, step=1, key="qa_days")
@@ -970,7 +948,7 @@ ctx = {
     "unmark_done": unmark_done,
     "appointment_label": appointment_label,
     "pick_from_list": pick_from_list,
-    "pick_owner": pick_owner,  # ✅ FIX: required by ui_detail.py
+    "pick_owner": pick_owner,
     "request_done_single": request_done_single,
     "request_done_grid": request_done_grid,
     "employees": st.session_state.employees,
@@ -982,19 +960,18 @@ ctx = {
     "forecast_finish_date": forecast_finish_date,
 
     # REQUIRED by ui_data.py
-    
-"series": st.session_state.series,
-"save_series": save_series,
-"save_employees": save_employees,
-"save_lists": save_lists,
-"resolve_owner_id": resolve_owner_id,
-"safe_container": safe_container,
-"segmented": segmented,
-"compute_done_composition": compute_done_composition,
-"forecast_eta": forecast_eta,
-"week_window": week_window,
-"forecast_eta_units": forecast_eta_units,
-"DATA_FILE": str(STATE_PATH),
+    "series": st.session_state.series,
+    "save_series": save_series,
+    "save_employees": save_employees,
+    "save_lists": save_lists,
+    "resolve_owner_id": resolve_owner_id,
+    "safe_container": safe_container,
+    "segmented": segmented,
+    "compute_done_composition": compute_done_composition,
+    "forecast_eta": forecast_eta,
+    "week_window": week_window,
+    "forecast_eta_units": forecast_eta_units,
+    "DATA_FILE": str(STATE_PATH),
     "EMP_FILE": str(EMP_PATH),
     "LISTS_FILE": str(LISTS_PATH),
 }
