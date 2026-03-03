@@ -271,6 +271,51 @@ def _plot_gantt(
             continue
         filtered.append(it)
 
+    # If dependencies are shown, ensure predecessors are included so arrows can be drawn.
+    # Otherwise arrows disappear when a predecessor is outside the current window.
+    plot_from = win_from
+    plot_to = win_to
+    if show_deps and filtered:
+        # build quick index from item id -> item
+        item_by_id: Dict[str, Dict[str, Any]] = {}
+        for it in items_sorted:
+            sid = str(it.get("id") or "").strip()
+            if sid and sid not in item_by_id:
+                item_by_id[sid] = it
+
+        include_ids = {str(it.get("id") or "").strip() for it in filtered if str(it.get("id") or "").strip()}
+        to_add: List[str] = []
+        for it in list(filtered):
+            sid = str(it.get("id") or "").strip()
+            s = series_by_id.get(sid)
+            if not s:
+                continue
+            for pid in _get_preds(s):
+                pid = str(pid).strip()
+                if not pid or pid in include_ids:
+                    continue
+                if pid in item_by_id:
+                    include_ids.add(pid)
+                    to_add.append(pid)
+
+        if to_add:
+            # keep original sort order by scanning items_sorted
+            new_filtered: List[Dict[str, Any]] = []
+            for it in items_sorted:
+                sid = str(it.get("id") or "").strip()
+                if sid and sid in include_ids:
+                    new_filtered.append(it)
+            filtered = new_filtered
+
+            # expand x-axis only as needed so newly included dependency bars/arrows are visible
+            starts = [_safe_date(it.get("start")) for it in filtered]
+            ends = [_safe_date(it.get("end")) for it in filtered]
+            starts = [d for d in starts if d]
+            ends = [d for d in ends if d]
+            if starts and ends:
+                plot_from = min(plot_from, min(starts))
+                plot_to = max(plot_to, max(ends))
+
     if not filtered:
         st.info("Keine Tasks im gewählten Zeitraum.")
         return
@@ -394,7 +439,7 @@ def _plot_gantt(
     ax.xaxis.set_major_locator(mdates.AutoDateLocator())
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
 
-    ax.set_xlim(mdates.date2num(win_from), mdates.date2num(win_to + timedelta(days=1)))
+    ax.set_xlim(mdates.date2num(plot_from), mdates.date2num(plot_to + timedelta(days=1)))
     ax.grid(True, axis="x", linestyle="--", linewidth=0.5)
     ax.set_xlabel("Date")
     ax.set_ylabel("Tasks")
