@@ -52,7 +52,7 @@ from ui_home import render as render_home
 from ui_kanban import render as render_kanban
 
 
-__version__ = "2026.03.03.3"
+__version__ = "2026.03.03.4"
 
 APP_TITLE = "OMG Coop"
 
@@ -387,6 +387,63 @@ def pick_from_list(
     return pick
 
 
+# ✅ FIX: ui_detail.py expects these
+def pick_owner(
+    label: str,
+    key: str,
+    current_owner_id: str,
+    current_owner_display: str,
+    employees: List[Dict[str, Any]],
+) -> Tuple[str, str]:
+    cur_id = str(current_owner_id or "").strip()
+    cur_name = str(current_owner_display or "").strip()
+
+    opts: List[Tuple[str, str]] = []
+    for e in employees or []:
+        eid = str(e.get("id") or "").strip()
+        dn = str(e.get("display_name") or "").strip()
+        if not eid or not dn:
+            continue
+        opts.append((dn, eid))
+
+    seen = set()
+    uniq: List[Tuple[str, str]] = []
+    for dn, eid in opts:
+        k = (dn, eid)
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append((dn, eid))
+    opts = uniq
+
+    if cur_id and cur_name and (cur_name, cur_id) not in opts:
+        opts = [(cur_name, cur_id)] + opts
+
+    display_options = ["—"] + [dn for dn, _eid in opts]
+    idx = display_options.index(cur_name) if cur_name and cur_name in display_options else 0
+
+    picked_name = st.selectbox(label, options=display_options, index=idx, key=key)
+
+    if picked_name == "—":
+        return "", ""
+
+    for dn, eid in opts:
+        if dn == picked_name:
+            return eid, dn
+
+    return cur_id, picked_name
+
+
+def resolve_owner_id(owner_display: str, employees: List[Dict[str, Any]]) -> str:
+    owner_display = str(owner_display or "").strip()
+    if not owner_display:
+        return ""
+    for e in employees or []:
+        if str(e.get("display_name") or "").strip() == owner_display:
+            return str(e.get("id") or "").strip()
+    return ""
+
+
 def handle_done_requests() -> None:
     req = st.session_state.pop("_done_request", None)
     if not req:
@@ -407,8 +464,6 @@ def handle_done_requests() -> None:
         pass
 
 
-# ------------------ Init state ------------------
-
 if "page" not in st.session_state:
     st.session_state.page = "HOME"
     st.session_state.page_prev = "HOME"
@@ -424,8 +479,6 @@ if "page" not in st.session_state:
     sync_lists_from_data()
 
 today = date.today()
-
-# ------------------ Sidebar ------------------
 
 st.sidebar.title(APP_TITLE)
 
@@ -475,8 +528,6 @@ with st.sidebar.expander("Hilfe", expanded=False):
     st.button("🧙 Anfänger", key="beginner_btn")
     st.caption("Hilfe ist kontextsensitiv.")
 
-
-# ------------------ Navigation ------------------
 
 NAV_SECTIONS = [
     ("Start", [("Home", "HOME")]),
@@ -535,8 +586,6 @@ if picked_page != st.session_state.page:
     st.rerun()
 
 
-# ------------------ Page render context ------------------
-
 ctx = {
     "today": today,
     "persist": persist,
@@ -551,6 +600,11 @@ ctx = {
     "save_employees": save_employees,
     "save_lists": save_lists,
     "pick_from_list": pick_from_list,
+
+    # ✅ FIX for ui_detail.py
+    "pick_owner": pick_owner,
+    "resolve_owner_id": resolve_owner_id,
+
     "gantt_items": gantt_items,
     "is_task": is_task,
     "is_appointment": is_appointment,
@@ -568,13 +622,11 @@ ctx = {
     "forecast_finish_date": forecast_finish_date,
     "forecast_eta_units": forecast_eta_units,
 
-    # ✅ REQUIRED BY ui_data.py (fix for your KeyError)
+    # required by ui_data.py
     "DATA_FILE": str(STATE_PATH),
     "EMP_FILE": str(EMP_PATH),
     "LISTS_FILE": str(LISTS_PATH),
 }
-
-# ------------------ Main content render ------------------
 
 page = st.session_state.page
 
