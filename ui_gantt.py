@@ -6,11 +6,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
+from matplotlib.patches import FancyArrowPatch
 import streamlit as st
 
 from core import TaskSeries, would_create_cycle
 
-__version__ = "2026.03.03.2"
+__version__ = "2026.03.03.3"
 
 
 def _safe_date(x: Any) -> Optional[date]:
@@ -104,7 +105,6 @@ def _get_preds_from_series(s: TaskSeries) -> List[str]:
     except Exception:
         pass
 
-    # de-dup keep order
     out: List[str] = []
     seen = set()
     for p in preds:
@@ -117,7 +117,6 @@ def _get_preds_from_series(s: TaskSeries) -> List[str]:
 def _set_preds_to_series(s: TaskSeries, pred_ids: List[str]) -> None:
     pred_ids = [str(x).strip() for x in (pred_ids or []) if str(x).strip()]
 
-    # write BOTH: attribute + meta
     try:
         if hasattr(s, "predecessors"):
             setattr(s, "predecessors", list(pred_ids))
@@ -145,17 +144,17 @@ def _compute_window_defaults(items: List[Dict[str, Any]], today: date) -> Tuple[
     return min(starts), max(ends)
 
 
-def _render_dependency_editor(ctx: dict, series_filtered: List[TaskSeries]) -> None:
-    if not series_filtered:
-        st.info("Keine Tasks im aktuellen Filter.")
+def _render_dependency_editor(ctx: dict, series_all: List[TaskSeries]) -> None:
+    if not series_all:
+        st.info("Keine Tasks vorhanden.")
         return
 
-    by_id = {str(getattr(s, "series_id", "") or "").strip(): s for s in series_filtered}
+    by_id = {str(getattr(s, "series_id", "") or "").strip(): s for s in series_all}
     by_id = {k: v for k, v in by_id.items() if k}
 
     succ = st.selectbox(
         "Nachfolger (Succ)",
-        options=series_filtered,
+        options=series_all,
         format_func=_series_label,
         key="gantt_dep_succ",
     )
@@ -168,7 +167,7 @@ def _render_dependency_editor(ctx: dict, series_filtered: List[TaskSeries]) -> N
         return
 
     current = _get_preds_from_series(succ)
-    available_preds = [s for s in series_filtered if str(getattr(s, "series_id", "") or "").strip() and s is not succ]
+    available_preds = [s for s in series_all if str(getattr(s, "series_id", "") or "").strip() and s is not succ]
 
     picked = st.multiselect(
         "Vorgänger (Pred) – mehrere möglich",
@@ -181,10 +180,9 @@ def _render_dependency_editor(ctx: dict, series_filtered: List[TaskSeries]) -> N
     pred_ids = [str(getattr(p, "series_id", "") or "").strip() for p in picked]
     pred_ids = [p for p in pred_ids if p and p != succ_id]
 
-    # cycle check
     for pid in pred_ids:
         try:
-            if would_create_cycle(series_filtered, src_id=pid, tgt_id=succ_id):
+            if would_create_cycle(series_all, src_id=pid, tgt_id=succ_id):
                 st.error("Ungültig: Diese Abhängigkeit würde einen Zyklus erzeugen.")
                 return
         except Exception:
@@ -215,17 +213,9 @@ def _plot_gantt(
     win_from: date,
     win_to: date,
     show_deps: bool,
+    show_debug: bool,
 ) -> None:
-    # Sort stable
-    def sort_key(it: Dict[str, Any]) -> Tuple[str, str, str]:
-        sid = str(it.get("id") or it.get("series_id") or "").strip()
-        s = series_by_id.get(sid)
-        project = (getattr(s, "project", "") or "").strip() if s else str(it.get("project") or "").strip()
-        owner = (getattr(s, "owner", "") or "").strip() if s else str(it.get("owner") or "").strip()
-        title = (getattr(s, "title", "") or "").strip() if s else str(it.get("title") or "").strip()
-        return (_norm(project), _norm(owner), _norm(title))
-
-    # normalize items ids
+    # normalize
     norm_items: List[Dict[str, Any]] = []
     for it in items or []:
         sid = str(it.get("id") or it.get("series_id") or "").strip()
@@ -241,53 +231,58 @@ def _plot_gantt(
                 "owner": it.get("owner") or "",
                 "start": stt,
                 "end": en,
-                # optional: predecessors may exist on items
                 "predecessors": it.get("predecessors", []),
             }
         )
 
+    def sort_key(it: Dict[str, Any]) -> Tuple[str, str, str]:
+        sid = it["id"]
+        s = series_by_id.get(sid)
+        project = (getattr(s, "project", "") or "").strip() if s else str(it.get("project") or "").strip()
+        owner = (getattr(s, "owner", "") or "").strip() if s else str(it.get("owner") or "").strip()
+        title = (getattr(s, "title", "") or "").strip() if s else str(it.get("title") or "").strip()
+        return (_norm(project), _norm(owner), _norm(title))
+
     items_sorted = sorted(norm_items, key=sort_key)
 
-    # filter by time overlap
-    filtered: List[Dict[str, Any]] = []
-    for it in items_sorted:
-        stt = it["start"]
-        en = it["end"]
-        if en < win_from or stt > win_to:
-            continue
-        filtered.append(it)
+    # overlap window filter
+    filtered = [it for it in items_sorted if not (it["end"] < win_from or it["start"] > win_to)]
 
     plot_from = win_from
     plot_to = win_to
 
-    # include predecessor items when deps enabled
+    # include preds if deps on
     if show_deps and filtered:
         item_by_id = {it["id"]: it for it in items_sorted}
         include = {it["id"] for it in filtered}
 
-        for it in list(filtered):
-            sid = it["id"]
+        def _preds_for_id(sid: str) -> List[str]:
+            preds: List[str] = []
             s = series_by_id.get(sid)
-            preds = []
-
-            # read preds from series robustly
             if s:
-                preds = _get_preds_from_series(s)
-
-            # also read preds from items if present
-            v = it.get("predecessors", [])
+                preds.extend(_get_preds_from_series(s))
+            v = item_by_id.get(sid, {}).get("predecessors", [])
             if isinstance(v, list):
                 for x in v:
                     xs = str(x).strip()
                     if xs and xs not in preds:
                         preds.append(xs)
+            # de-dup
+            out = []
+            seen = set()
+            for p in preds:
+                if p and p not in seen:
+                    seen.add(p)
+                    out.append(p)
+            return out
 
-            for pid in preds:
+        # one pass is enough because our graph depth is small in practice
+        for it in list(filtered):
+            for pid in _preds_for_id(it["id"]):
                 if pid in item_by_id:
                     include.add(pid)
 
         filtered = [it for it in items_sorted if it["id"] in include]
-
         starts = [it["start"] for it in filtered]
         ends = [it["end"] for it in filtered]
         plot_from = min(plot_from, min(starts))
@@ -297,15 +292,38 @@ def _plot_gantt(
         st.info("Keine Tasks im Zeitraum.")
         return
 
-    # y mapping
-    ymap: Dict[str, int] = {it["id"]: i for i, it in enumerate(filtered)}
-    labels: List[str] = []
-    for it in filtered:
-        sid = it["id"]
-        s = series_by_id.get(sid)
-        labels.append(_series_label(s) if s else sid)
-
+    ymap = {it["id"]: i for i, it in enumerate(filtered)}
+    labels = [_series_label(series_by_id.get(it["id"])) if series_by_id.get(it["id"]) else it["id"] for it in filtered]
     item_dates = {it["id"]: (it["start"], it["end"]) for it in filtered}
+
+    # DEBUG: list detected edges
+    edges: List[Tuple[str, str]] = []
+    if show_deps:
+        for it in filtered:
+            sid = it["id"]
+            preds = []
+            s = series_by_id.get(sid)
+            if s:
+                preds.extend(_get_preds_from_series(s))
+            v = it.get("predecessors", [])
+            if isinstance(v, list):
+                for x in v:
+                    xs = str(x).strip()
+                    if xs and xs not in preds:
+                        preds.append(xs)
+            for pid in preds:
+                edges.append((pid, sid))
+
+    if show_debug:
+        with st.expander("Debug: erkannte Dependencies (Pred → Succ)", expanded=False):
+            if not edges:
+                st.write("Keine Kanten erkannt (edges = 0). Dann ist im State wirklich nichts gespeichert.")
+            else:
+                st.write(f"Kanten erkannt: {len(edges)}")
+                st.dataframe(
+                    [{"pred": p, "succ": s, "pred_in_plot": p in ymap, "succ_in_plot": s in ymap} for p, s in edges],
+                    use_container_width=True,
+                )
 
     fig_h = max(4.0, min(0.45 * len(filtered) + 2.5, 18.0))
     fig, ax = plt.subplots(figsize=(14, fig_h))
@@ -317,7 +335,7 @@ def _plot_gantt(
         y = ymap[sid]
 
         left = mdates.date2num(stt)
-        right = mdates.date2num(en + timedelta(days=1))  # inclusive end
+        right = mdates.date2num(en + timedelta(days=1))
         width = max(0.5, right - left)
 
         ax.barh(
@@ -332,59 +350,39 @@ def _plot_gantt(
 
     ax.axvline(mdates.date2num(today), linestyle="--", linewidth=1.0)
 
-    # arrows (thicker, no clip)
+    # arrows: FancyArrowPatch (reliable)
     if show_deps:
-        for it in filtered:
-            sid = it["id"]
-            succ = series_by_id.get(sid)
-
-            preds: List[str] = []
-            if succ:
-                preds = _get_preds_from_series(succ)
-
-            v = it.get("predecessors", [])
-            if isinstance(v, list):
-                for x in v:
-                    xs = str(x).strip()
-                    if xs and xs not in preds:
-                        preds.append(xs)
-
-            succ_start, _ = item_dates.get(sid, (None, None))
-            if not succ_start:
+        for pred_id, succ_id in edges:
+            if pred_id not in ymap or succ_id not in ymap:
                 continue
 
-            for pid in preds:
-                if pid not in ymap:
-                    continue
-                _ps, pe = item_dates.get(pid, (None, None))
-                if not pe:
-                    continue
+            succ_start, _ = item_dates.get(succ_id, (None, None))
+            _ps, pred_end = item_dates.get(pred_id, (None, None))
+            if not succ_start or not pred_end:
+                continue
 
-                # inside bars + ensure visible horizontal length
-                pred_right = mdates.date2num(pe) + 1.0
-                succ_left = mdates.date2num(succ_start)
-                x0 = pred_right - 0.12
-                x1 = succ_left + 0.12
-                if x1 <= x0:
-                    x1 = x0 + 0.35
+            pred_right = mdates.date2num(pred_end) + 1.0
+            succ_left = mdates.date2num(succ_start)
 
-                y0 = ymap[pid]
-                y1 = ymap[sid]
+            x0 = pred_right - 0.15
+            x1 = succ_left + 0.15
+            if x1 <= x0:
+                x1 = x0 + 0.50
 
-                ax.annotate(
-                    "",
-                    xy=(x1, y1),
-                    xytext=(x0, y0),
-                    arrowprops=dict(
-                        arrowstyle="-|>",
-                        linewidth=1.6,
-                        shrinkA=0,
-                        shrinkB=0,
-                        connectionstyle="angle3,angleA=0,angleB=90",
-                    ),
-                    zorder=50,
-                    clip_on=False,
-                )
+            y0 = ymap[pred_id]
+            y1 = ymap[succ_id]
+
+            arrow = FancyArrowPatch(
+                (x0, y0),
+                (x1, y1),
+                arrowstyle="-|>",
+                mutation_scale=14,  # size of arrow head
+                linewidth=1.8,
+                connectionstyle="angle3,angleA=0,angleB=90",
+                zorder=80,
+                clip_on=False,
+            )
+            ax.add_patch(arrow)
 
     ax.set_yticks(list(range(len(labels))))
     ax.set_yticklabels(labels, fontsize=9)
@@ -408,13 +406,11 @@ def render(ctx: dict) -> None:
     _flash_render()
 
     today = _get_today(ctx)
-
     series_all = _get_series_list(ctx)
     if not series_all:
         st.info("Noch keine Tasks vorhanden.")
         return
 
-    # full mapping (not filtered away)
     series_by_id_all = {str(getattr(s, "series_id", "") or "").strip(): s for s in series_all}
     series_by_id_all = {k: v for k, v in series_by_id_all.items() if k}
 
@@ -427,25 +423,7 @@ def render(ctx: dict) -> None:
             items_raw = list(gantt_fn(series_all) or [])
         except Exception:
             items_raw = []
-    else:
-        # fallback
-        for s in series_all:
-            sid = str(getattr(s, "series_id", "") or "").strip()
-            if not sid:
-                continue
-            items_raw.append(
-                {
-                    "id": sid,
-                    "title": getattr(s, "title", ""),
-                    "start": getattr(s, "start", None),
-                    "end": getattr(s, "end", None),
-                    "project": getattr(s, "project", ""),
-                    "owner": getattr(s, "owner", ""),
-                    "predecessors": _get_preds_from_series(s),
-                }
-            )
 
-    # filters
     with st.expander("Filters & Zeitraum", expanded=True):
         win_def_from, win_def_to = _compute_window_defaults(items_raw, today)
         rng = st.date_input("Zeitraum (From / To)", value=(win_def_from, win_def_to), key="gantt_window")
@@ -455,13 +433,13 @@ def render(ctx: dict) -> None:
             win_from, win_to = win_def_from, win_def_to
 
         show_deps = st.checkbox("Dependencies-Pfeile anzeigen", value=True, key="gantt_show_deps")
+        show_debug = st.checkbox("Debug anzeigen", value=False, key="gantt_show_debug")
 
     with st.expander("➕ Dependencies bearbeiten", expanded=False):
-        # editor uses filtered list? keep it simple: all series
         _render_dependency_editor(ctx, list(series_all))
 
     st.markdown("---")
-    st.caption("Hinweis: Vorgänger außerhalb des Zeitfensters werden automatisch mitgezeichnet, wenn Pfeile aktiv sind.")
+    st.caption("Wenn Debug 'edges = 0' zeigt, ist im State wirklich nichts gespeichert.")
     _plot_gantt(
         items=items_raw,
         series_by_id=series_by_id_all,
@@ -469,4 +447,5 @@ def render(ctx: dict) -> None:
         win_from=win_from,
         win_to=win_to,
         show_deps=show_deps,
+        show_debug=show_debug,
     )
