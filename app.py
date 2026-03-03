@@ -52,7 +52,7 @@ from ui_home import render as render_home
 from ui_kanban import render as render_kanban
 
 
-__version__ = "2026.03.03.2"
+__version__ = "2026.03.03.3"
 
 APP_TITLE = "OMG Coop"
 
@@ -89,16 +89,6 @@ def _list_union(a: List[str], b: List[str]) -> List[str]:
 
 
 def load_employees() -> List[Dict[str, Any]]:
-    """Load employees from employees.json.
-
-    Historical compatibility:
-    - canonical: list[dict]
-    - some exports/imports: {"schema_version": 1, "employees": [...]}
-    - legacy/dirty: list[str] (names) or list[str(dict-repr)]
-
-    Output is normalized into: list[{id, display_name, aliases}]
-    """
-
     def _slugify(s: str) -> str:
         s = (s or "").strip().lower()
         out = []
@@ -113,18 +103,15 @@ def load_employees() -> List[Dict[str, Any]]:
         return v or "unknown"
 
     def _maybe_parse_dict_string(s: str) -> Dict[str, Any] | None:
-        """Best-effort parse of a string that looks like a dict (python or json)."""
         s = (s or "").strip()
         if not (s.startswith("{") and s.endswith("}")):
             return None
-        # Try JSON first
         try:
             d = json.loads(s)
             if isinstance(d, dict):
                 return d
         except Exception:
             pass
-        # Try python literal
         try:
             import ast
 
@@ -143,7 +130,6 @@ def load_employees() -> List[Dict[str, Any]]:
     except Exception:
         return []
 
-    # unwrap schema container if present
     if isinstance(raw, dict) and isinstance(raw.get("employees"), list):
         raw_list = raw.get("employees", [])
     elif isinstance(raw, list):
@@ -156,9 +142,7 @@ def load_employees() -> List[Dict[str, Any]]:
 
     for item in raw_list:
         try:
-            # item can be dict or string
             if isinstance(item, str):
-                # could be a dict-repr string
                 d = _maybe_parse_dict_string(item)
                 if isinstance(d, dict):
                     item = d
@@ -176,8 +160,6 @@ def load_employees() -> List[Dict[str, Any]]:
             if not isinstance(item, dict):
                 continue
 
-            # Some broken states had display_name containing the whole dict as a string.
-            # Try to recover it.
             dn_raw = str(item.get("display_name", "") or "").strip()
             if dn_raw.startswith("{") and "display_name" in dn_raw:
                 d2 = _maybe_parse_dict_string(dn_raw)
@@ -231,13 +213,6 @@ def load_lists() -> Dict[str, List[str]]:
 
 
 def _extract_list_values(x: Any) -> List[str]:
-    """Normalize list inputs coming from UI editors.
-
-    Accepts:
-      - list[str]
-      - list[dict] with key 'value' (e.g., st.data_editor rows)
-      - None
-    """
     if x is None:
         return []
     if isinstance(x, list):
@@ -260,12 +235,6 @@ def _extract_list_values(x: Any) -> List[str]:
 
 
 def save_lists(*args, **kwargs) -> None:
-    """Persist portfolios/projects/themes.
-
-    Backwards compatible with both call styles:
-      1) save_lists(portfolios, projects, themes)
-      2) save_lists({"portfolios": ..., "projects": ..., "themes": ...})
-    """
     portfolios: List[str] = []
     projects: List[str] = []
     themes: List[str] = []
@@ -293,7 +262,6 @@ def save_lists(*args, **kwargs) -> None:
 
 
 def persist() -> None:
-    # Persist with version metadata (backward compatible loader)
     save_state(STATE_PATH, st.session_state.series, app_version=__version__)
 
 
@@ -336,13 +304,8 @@ def close_detail() -> None:
 
 
 def find_series(series_id: str) -> TaskSeries:
-    """Find a series by id.
-
-    IDs can show up as int/str depending on source (import/UI). Normalize to str.
-    """
     sid = str(series_id)
     for x in st.session_state.series:
-        # tolerate both attribute names without changing behavior elsewhere
         if str(getattr(x, "series_id", getattr(x, "id", ""))) == sid:
             return x
     raise KeyError(sid)
@@ -356,21 +319,6 @@ def delete_series(series_id: str) -> None:
         if str(getattr(x, "series_id", getattr(x, "id", ""))) != sid
     ]
     persist()
-
-
-def appointment_label(s: TaskSeries) -> str:
-    ts = (getattr(s, "time_start", "") or "").strip()
-    te = (getattr(s, "time_end", "") or "").strip()
-    loc = (getattr(s, "location", "") or "").strip()
-    parts = []
-    if ts and te:
-        parts.append(f"{ts}–{te}")
-    elif ts:
-        parts.append(ts)
-    if loc:
-        parts.append(loc)
-    suffix = (" · " + " · ".join(parts)) if parts else ""
-    return f"{s.title}{suffix}"
 
 
 def visible_series() -> List[TaskSeries]:
@@ -439,107 +387,10 @@ def pick_from_list(
     return pick
 
 
-def pick_owner(
-    label: str,
-    key: str,
-    current_owner_id: str,
-    current_owner_display: str,
-    employees: List[Dict[str, Any]],
-) -> Tuple[str, str]:
-    """
-    Stable Owner picker used by ui_detail.py.
-    Returns: (owner_id, owner_display_name)
-    """
-    cur_id = str(current_owner_id or "").strip()
-    cur_name = str(current_owner_display or "").strip()
-
-    opts: List[Tuple[str, str]] = []
-    for e in employees or []:
-        eid = str(e.get("id") or "").strip()
-        dn = str(e.get("display_name") or "").strip()
-        if not eid or not dn:
-            continue
-        opts.append((dn, eid))
-
-    seen = set()
-    uniq: List[Tuple[str, str]] = []
-    for dn, eid in opts:
-        k = (dn, eid)
-        if k in seen:
-            continue
-        seen.add(k)
-        uniq.append((dn, eid))
-    opts = uniq
-
-    if cur_id and cur_name:
-        if (cur_name, cur_id) not in opts:
-            opts = [(cur_name, cur_id)] + opts
-
-    display_options = ["—"] + [dn for dn, _eid in opts]
-    idx = display_options.index(cur_name) if cur_name and cur_name in display_options else 0
-
-    picked_name = st.selectbox(label, options=display_options, index=idx, key=key)
-
-    if picked_name == "—":
-        return "", ""
-
-    for dn, eid in opts:
-        if dn == picked_name:
-            return eid, dn
-
-    return cur_id, picked_name
-
-
-def resolve_owner_id(owner_display: str, employees: List[Dict[str, Any]]) -> str:
-    owner_display = str(owner_display or "").strip()
-    if not owner_display:
-        return ""
-    for e in employees or []:
-        if str(e.get("display_name") or "").strip() == owner_display:
-            return str(e.get("id") or "").strip()
-    return ""
-
-
-def save_series(series_list: List[TaskSeries]) -> None:
-    save_state(STATE_PATH, series_list)
-
-
-def safe_container(*, border: bool = True):
-    try:
-        return st.container(border=border)
-    except TypeError:
-        return st.container()
-
-
-def segmented(label: str, options: List[str], default: str):
-    options = list(options or [])
-    if not options:
-        return default
-    default = default if default in options else options[0]
-
-    for attr in ("segmented_control", "segmented"):
-        fn = getattr(st, attr, None)
-        if callable(fn):
-            try:
-                return fn(label, options, default=default)
-            except TypeError:
-                try:
-                    return fn(label, options, index=options.index(default))
-                except Exception:
-                    pass
-
-    # fallback
-    idx = options.index(default) if default in options else 0
-    return st.radio(label, options, index=idx, horizontal=True)
-
-
-# ------------------ Done requests (existing behavior) ------------------
-
 def handle_done_requests() -> None:
     req = st.session_state.pop("_done_request", None)
     if not req:
         return
-    # existing behavior kept
     try:
         series_id = req.get("series_id")
         day_iso = req.get("day_iso")
@@ -574,7 +425,7 @@ if "page" not in st.session_state:
 
 today = date.today()
 
-# ------------------ Sidebar (header + quick stats) ------------------
+# ------------------ Sidebar ------------------
 
 st.sidebar.title(APP_TITLE)
 
@@ -593,7 +444,7 @@ with st.sidebar.expander("Versionen", expanded=False):
     )
 
 st.session_state.focus_mode = st.sidebar.toggle(
-    "Focus mode (only active tasks,\nno META, no appointments)",
+    "Focus mode (only active tasks, no META, no appointments)",
     value=bool(st.session_state.get("focus_mode", False)),
     key="focus_mode_toggle",
 )
@@ -622,7 +473,8 @@ if isinstance(_notice, dict) and _notice.get("value"):
 with st.sidebar.expander("Hilfe", expanded=False):
     st.button("❓ Hilfe", key="help_btn")
     st.button("🧙 Anfänger", key="beginner_btn")
-    st.caption("Hilfe ist kontextsensitiv: öffnet automatisch\nden passenden Abschnitt zur aktuellen\nSeite.")
+    st.caption("Hilfe ist kontextsensitiv.")
+
 
 # ------------------ Navigation ------------------
 
@@ -682,80 +534,6 @@ if picked_page != st.session_state.page:
         st.session_state.open_series = None
     st.rerun()
 
-with st.sidebar.expander("Quick add (task)", expanded=False):
-    qa_title = st.text_input("Title", key="qa_title")
-
-    owner_names = [e.get("display_name", "") for e in st.session_state.employees if e.get("display_name")]
-    qa_owner = st.selectbox(
-        "Owner",
-        options=owner_names if owner_names else ["—"],
-        index=0,
-        key="qa_owner",
-    )
-
-    qa_owner_id = ""
-    if qa_owner != "—":
-        for e in st.session_state.employees:
-            if e.get("display_name") == qa_owner:
-                qa_owner_id = str(e.get("id") or "")
-                break
-
-    qa_project = pick_from_list(
-        "Project",
-        key="qa_project",
-        values=st.session_state.lists.get("projects", []),
-        current="",
-        require=True,
-        list_key="projects",
-    )
-    qa_theme = pick_from_list(
-        "Theme",
-        key="qa_theme",
-        values=st.session_state.lists.get("themes", []),
-        current="General",
-        require=True,
-        list_key="themes",
-    )
-    qa_portfolio = pick_from_list(
-        "Portfolio",
-        key="qa_portfolio",
-        values=st.session_state.lists.get("portfolios", []),
-        current="Default",
-        require=True,
-        list_key="portfolios",
-    )
-
-    qa_days = st.number_input("Duration (days)", min_value=1, max_value=30, value=5, step=1, key="qa_days")
-    qa_weight = st.number_input("Weight/Units", min_value=0.0, max_value=1000.0, value=1.0, step=1.0, key="qa_weight")
-
-    if st.button("Add", key="qa_add"):
-        if qa_title.strip():
-            s = new_series(
-                title=qa_title.strip(),
-                portfolio=qa_portfolio,
-                project=qa_project,
-                theme=qa_theme,
-                owner="" if qa_owner == "—" else qa_owner,
-                owner_id=qa_owner_id,
-                start=today,
-                end=today + timedelta(days=int(qa_days) - 1),
-                is_meta=False,
-                kind="task",
-                state="ACTIVE",
-            )
-            try:
-                s.weight = float(qa_weight)
-            except Exception:
-                pass
-            st.session_state.series.append(s)
-            persist()
-            sync_lists_from_data()
-            st.success("Added.")
-            st.session_state.qa_title = ""
-            st.session_state.nav_force_sync = True
-            st.rerun()
-        else:
-            st.warning("Title required.")
 
 # ------------------ Page render context ------------------
 
@@ -772,10 +550,7 @@ ctx = {
     "lists": st.session_state.lists,
     "save_employees": save_employees,
     "save_lists": save_lists,
-    "resolve_owner_id": resolve_owner_id,
-    "pick_owner": pick_owner,
     "pick_from_list": pick_from_list,
-    "segmented": segmented,
     "gantt_items": gantt_items,
     "is_task": is_task,
     "is_appointment": is_appointment,
@@ -792,6 +567,11 @@ ctx = {
     "calc_velocity": calc_velocity,
     "forecast_finish_date": forecast_finish_date,
     "forecast_eta_units": forecast_eta_units,
+
+    # ✅ REQUIRED BY ui_data.py (fix for your KeyError)
+    "DATA_FILE": str(STATE_PATH),
+    "EMP_FILE": str(EMP_PATH),
+    "LISTS_FILE": str(LISTS_PATH),
 }
 
 # ------------------ Main content render ------------------
