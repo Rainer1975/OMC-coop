@@ -19,11 +19,9 @@ from core import (
     bulk_set_done,
     can_depend_series,
     capacity_summary as core_capacity_summary,
-    compute_units_composition,
     build_burndown_series,
     calc_velocity,
     forecast_finish_date,
-    forecast_eta_units,
     gantt_items,
     is_active,
     is_appointment,
@@ -51,7 +49,7 @@ from ui_gantt import render as render_gantt
 from ui_home import render as render_home
 from ui_kanban import render as render_kanban
 
-__version__ = "2026.03.03.5"
+__version__ = "2026.03.03.6"
 
 APP_TITLE = "OMG Coop"
 
@@ -89,44 +87,33 @@ def _list_union(a: List[str], b: List[str]) -> List[str]:
 
 def load_employees() -> List[Dict[str, Any]]:
     """Load employees from employees.json.
-
-    Historical compatibility:
-    - canonical: list[dict]
-    - some exports/imports: {"schema_version": 1, "employees": [...]}
-    - legacy/dirty: list[str] (names) or list[str(dict-repr)]
-
-    Output is normalized into: list[{id, display_name, aliases}]
+    Supports:
+    - list[dict] canonical
+    - {"employees":[...]} container
+    - legacy list[str]
     """
-
     def _slugify(s: str) -> str:
         s = (s or "").strip().lower()
         out = []
         for ch in s:
-            if ch.isalnum():
-                out.append(ch)
-            else:
-                out.append("_")
+            out.append(ch if ch.isalnum() else "_")
         v = "".join(out).strip("_")
         while "__" in v:
             v = v.replace("__", "_")
         return v or "unknown"
 
     def _maybe_parse_dict_string(s: str) -> Dict[str, Any] | None:
-        """Best-effort parse of a string that looks like a dict (python or json)."""
         s = (s or "").strip()
         if not (s.startswith("{") and s.endswith("}")):
             return None
-        # Try JSON first
         try:
             d = json.loads(s)
             if isinstance(d, dict):
                 return d
         except Exception:
             pass
-        # Try python literal
         try:
             import ast
-
             d = ast.literal_eval(s)
             if isinstance(d, dict):
                 return d
@@ -142,7 +129,6 @@ def load_employees() -> List[Dict[str, Any]]:
     except Exception:
         return []
 
-    # unwrap schema container if present
     if isinstance(raw, dict) and isinstance(raw.get("employees"), list):
         raw_list = raw.get("employees", [])
     elif isinstance(raw, list):
@@ -155,9 +141,7 @@ def load_employees() -> List[Dict[str, Any]]:
 
     for item in raw_list:
         try:
-            # item can be dict or string
             if isinstance(item, str):
-                # could be a dict-repr string
                 d = _maybe_parse_dict_string(item)
                 if isinstance(d, dict):
                     item = d
@@ -175,8 +159,6 @@ def load_employees() -> List[Dict[str, Any]]:
             if not isinstance(item, dict):
                 continue
 
-            # Some broken states had display_name containing the whole dict as a string.
-            # Try to recover it.
             dn_raw = str(item.get("display_name", "") or "").strip()
             if dn_raw.startswith("{") and "display_name" in dn_raw:
                 d2 = _maybe_parse_dict_string(dn_raw)
@@ -187,9 +169,11 @@ def load_employees() -> List[Dict[str, Any]]:
             dn = _norm(dn_raw)
             if not dn:
                 continue
+
             eid = str(item.get("id", "") or "").strip() or _slugify(dn)
             if eid.lower() == "none":
                 eid = _slugify(dn)
+
             if eid in seen:
                 continue
             seen.add(eid)
@@ -331,9 +315,7 @@ def find_series(series_id: str) -> TaskSeries:
 def delete_series(series_id: str) -> None:
     sid = str(series_id)
     st.session_state.series = [
-        x
-        for x in st.session_state.series
-        if str(getattr(x, "series_id", getattr(x, "id", ""))) != sid
+        x for x in st.session_state.series if str(getattr(x, "series_id", getattr(x, "id", ""))) != sid
     ]
     persist()
 
@@ -469,21 +451,6 @@ def appointment_label(s: TaskSeries) -> str:
     return " · ".join(bits)
 
 
-def segmented(label: str, options: List[str], key: str, index: int = 0) -> str:
-    # simple fallback segmented control
-    return st.radio(label, options=options, key=key, index=index, horizontal=True)
-
-
-def safe_container() -> Any:
-    return st.container()
-
-
-def week_window(today: date) -> Tuple[date, date]:
-    start = today - timedelta(days=today.weekday())
-    end = start + timedelta(days=6)
-    return start, end
-
-
 def capacity_summary(
     tasks_all: List[TaskSeries],
     employees: List[Dict[str, Any]],
@@ -502,12 +469,139 @@ def capacity_summary(
     )
 
 
-def compute_done_composition(tasks: List[TaskSeries]):
-    return compute_units_composition(tasks)
+# =========================================================
+# ✅ Burndown API compatibility (ui_burndown expects this)
+# =========================================================
+def series_total_units(s: TaskSeries) -> float:
+    m = getattr(s, "meta", {}) or {}
+    if isinstance(m, dict):
+        for k in ("units", "weight", "task_weight"):
+            if k in m and m[k] is not None:
+                try:
+                    return float(m[k])
+                except Exception:
+                    pass
+    return 1.0
 
 
-def forecast_eta(all_days, done_per_day, remaining_per_day, today: date, window_business_days: int = 10):
-    return forecast_eta_units(all_days, done_per_day, remaining_per_day, today, window_business_days)
+def _is_workday(d: date) -> bool:
+    return d.weekday() < 5
+
+
+def _workdays_between_inclusive(a: date, b: date) -> int:
+    if a > b:
+        return 0
+    d = a
+    n = 0
+    while d <= b:
+        if _is_workday(d):
+            n += 1
+        d += timedelta(days=1)
+    return max(1, n)
+
+
+def _workday_range(a: date, b: date) -> List[date]:
+    out: List[date] = []
+    d = a
+    while d <= b:
+        if _is_workday(d):
+            out.append(d)
+        d += timedelta(days=1)
+    return out
+
+
+def _add_workdays(start: date, n: int) -> date:
+    if n <= 0:
+        return start
+    d = start
+    added = 0
+    while added < n:
+        d += timedelta(days=1)
+        if _is_workday(d):
+            added += 1
+    return d
+
+
+def compute_units_composition(tasks: List[TaskSeries]):
+    """
+    ui_burndown expects:
+      all_days, done_u, rem_u, _
+    where days are WORKDAYS and units are distributed evenly across workdays of each task.
+    """
+    if not tasks:
+        return [], [], [], 0.0
+
+    start = min(s.start for s in tasks)
+    end = max(s.end for s in tasks)
+    all_days = _workday_range(start, end)
+    if not all_days:
+        return [], [], [], 0.0
+
+    total_scope = float(sum(series_total_units(s) for s in tasks))
+
+    # per-task per-workday allocation
+    per_day_units: Dict[str, float] = {}
+    for s in tasks:
+        wd = _workdays_between_inclusive(s.start, s.end)
+        per_day_units[s.series_id] = float(series_total_units(s)) / float(wd)
+
+    done_u: List[float] = []
+    cum_done = 0.0
+    rem_u: List[float] = []
+
+    for d in all_days:
+        day_done = 0.0
+        for s in tasks:
+            if s.start <= d <= s.end and _is_workday(d):
+                dd = getattr(s, "done_days", set()) or set()
+                if isinstance(dd, set) and d in dd:
+                    day_done += per_day_units.get(s.series_id, 0.0)
+
+        done_u.append(float(day_done))
+        cum_done += float(day_done)
+        rem_u.append(max(0.0, total_scope - cum_done))
+
+    return all_days, done_u, rem_u, total_scope
+
+
+def forecast_eta_units(all_days, done_u, rem_u, today: date, window_workdays: int = 10):
+    """
+    ui_burndown expects:
+      anchor, vel, eta, dq
+    """
+    if not all_days or not rem_u:
+        return today, 0.0, None, 0
+
+    # index of last day <= today
+    idx = 0
+    for i, d in enumerate(all_days):
+        if d <= today:
+            idx = i
+        else:
+            break
+
+    rem_today = float(rem_u[idx]) if idx < len(rem_u) else 0.0
+
+    # window days (workdays) up to today
+    w_end = idx
+    w_start = max(0, w_end - int(window_workdays) + 1)
+    win_days = all_days[w_start : w_end + 1]
+    win_done = done_u[w_start : w_end + 1] if done_u else []
+
+    if not win_days:
+        return today, 0.0, None, 0
+
+    # velocity: average done units per workday in window
+    vel = float(sum(float(x) for x in win_done)) / float(len(win_days)) if len(win_days) > 0 else 0.0
+    dq = sum(1 for x in win_done if float(x) > 0.0)
+
+    if vel <= 0.0:
+        return today, 0.0, None, dq
+
+    # ETA in workdays
+    eta_days = int((rem_today / vel) + 0.999999)  # ceil
+    eta = _add_workdays(today, eta_days)
+    return today, vel, eta, dq
 
 
 # ✅ REQUIRED by ui_kanban.py
@@ -542,20 +636,10 @@ def handle_done_requests() -> None:
             row[0].write(f"**{s.title}** · {day_iso}")
             if reason:
                 row[0].caption(reason)
-            if row[1].button(
-                "✅ Quittieren",
-                key=f"done_ok_{i}_{sid}_{day_iso}",
-                type="primary",
-                use_container_width=True,
-            ):
+            if row[1].button("✅ Quittieren", key=f"done_ok_{i}_{sid}_{day_iso}", type="primary", use_container_width=True):
                 mark_done(s, date.fromisoformat(day_iso))
                 persist()
-            elif row[2].button(
-                "✋ Ablehnen",
-                key=f"done_no_{i}_{sid}_{day_iso}",
-                type="secondary",
-                use_container_width=True,
-            ):
+            elif row[2].button("✋ Ablehnen", key=f"done_no_{i}_{sid}_{day_iso}", type="secondary", use_container_width=True):
                 pass
             else:
                 keep.append(r)
@@ -563,7 +647,6 @@ def handle_done_requests() -> None:
 
 
 # ------------------ Streamlit setup ------------------
-
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
 if "initialized" not in st.session_state:
@@ -584,7 +667,6 @@ if "initialized" not in st.session_state:
 today = date.today()
 
 # ------------------ Sidebar (header + quick stats) ------------------
-
 st.sidebar.title(APP_TITLE)
 
 with st.sidebar.expander("Versionen", expanded=False):
@@ -631,7 +713,6 @@ with st.sidebar.expander("Hilfe", expanded=False):
     st.caption("Hilfe ist kontextsensitiv: öffnet automatisch\nden passenden Abschnitt zur aktuellen\nSeite.")
 
 # ------------------ Navigation ------------------
-
 NAV_SECTIONS = [
     ("Start", [("Home", "HOME")]),
     ("Work", [("Kanban", "KANBAN"), ("Gantt", "GANTT"), ("Burndown", "BURNDOWN"), ("Dashboard", "DASHBOARD")]),
@@ -689,8 +770,6 @@ if picked_page != st.session_state.page:
     st.rerun()
 
 # ------------------ Page render context ------------------
-
-# NOTE: keep ctx complete; ui_* modules assume keys exist.
 ctx = {
     "today": today,
     "persist": persist,
@@ -719,20 +798,25 @@ ctx = {
     "pick_from_list": pick_from_list,
     "pick_owner": pick_owner,
 
-    # ✅ FIX for ui_kanban.py
+    # ✅ Kanban contract
     "request_done_single": request_done_single,
     "request_done_grid": request_done_grid,
 
     "employees": st.session_state.employees,
     "lists": st.session_state.lists,
     "capacity_summary": capacity_summary,
+
+    # ✅ Burndown contract (exactly what ui_burndown expects)
     "compute_units_composition": compute_units_composition,
+    "forecast_eta_units": forecast_eta_units,
+    "series_total_units": series_total_units,
+
+    # other analytics
     "build_burndown_series": build_burndown_series,
     "calc_velocity": calc_velocity,
     "forecast_finish_date": forecast_finish_date,
-    "forecast_eta_units": forecast_eta_units,
 
-    # REQUIRED by ui_data.py (keep)
+    # required by ui_data.py
     "series": st.session_state.series,
     "save_employees": save_employees,
     "save_lists": save_lists,
@@ -743,7 +827,6 @@ ctx = {
 }
 
 # ------------------ Main render ------------------
-
 page = st.session_state.page
 if page == "HOME":
     render_home(ctx)
