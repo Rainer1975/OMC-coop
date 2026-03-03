@@ -19,9 +19,11 @@ from core import (
     bulk_set_done,
     can_depend_series,
     capacity_summary as core_capacity_summary,
+    compute_units_composition,
     build_burndown_series,
     calc_velocity,
     forecast_finish_date,
+    forecast_eta_units,
     gantt_items,
     is_active,
     is_appointment,
@@ -49,7 +51,8 @@ from ui_gantt import render as render_gantt
 from ui_home import render as render_home
 from ui_kanban import render as render_kanban
 
-__version__ = "2026.03.03.7"
+
+__version__ = "2026.03.03.5"
 
 APP_TITLE = "OMG Coop"
 
@@ -86,17 +89,14 @@ def _list_union(a: List[str], b: List[str]) -> List[str]:
 
 
 def load_employees() -> List[Dict[str, Any]]:
-    """Load employees from employees.json.
-    Supports:
-    - list[dict] canonical (legacy)
-    - {"employees":[...]} container (preferred)
-    - legacy list[str]
-    """
     def _slugify(s: str) -> str:
         s = (s or "").strip().lower()
         out = []
         for ch in s:
-            out.append(ch if ch.isalnum() else "_")
+            if ch.isalnum():
+                out.append(ch)
+            else:
+                out.append("_")
         v = "".join(out).strip("_")
         while "__" in v:
             v = v.replace("__", "_")
@@ -114,6 +114,7 @@ def load_employees() -> List[Dict[str, Any]]:
             pass
         try:
             import ast
+
             d = ast.literal_eval(s)
             if isinstance(d, dict):
                 return d
@@ -129,7 +130,6 @@ def load_employees() -> List[Dict[str, Any]]:
     except Exception:
         return []
 
-    # unwrap schema container if present (preferred)
     if isinstance(raw, dict) and isinstance(raw.get("employees"), list):
         raw_list = raw.get("employees", [])
     elif isinstance(raw, list):
@@ -170,11 +170,9 @@ def load_employees() -> List[Dict[str, Any]]:
             dn = _norm(dn_raw)
             if not dn:
                 continue
-
             eid = str(item.get("id", "") or "").strip() or _slugify(dn)
             if eid.lower() == "none":
                 eid = _slugify(dn)
-
             if eid in seen:
                 continue
             seen.add(eid)
@@ -195,8 +193,10 @@ def load_employees() -> List[Dict[str, Any]]:
 
 
 def save_employees(employees: List[Dict[str, Any]]) -> None:
-    """
-    ✅ FIX: Always write schema wrapper so ui_data import/reload stays stable.
+    """Write employees.json in the stable wrapper format.
+
+    ui_data.py expects: {schema_version: 1, employees: [...]}
+    We still accept legacy list formats when loading.
     """
     if not isinstance(employees, list):
         employees = []
@@ -322,7 +322,9 @@ def find_series(series_id: str) -> TaskSeries:
 def delete_series(series_id: str) -> None:
     sid = str(series_id)
     st.session_state.series = [
-        x for x in st.session_state.series if str(getattr(x, "series_id", getattr(x, "id", ""))) != sid
+        x
+        for x in st.session_state.series
+        if str(getattr(x, "series_id", getattr(x, "id", ""))) != sid
     ]
     persist()
 
@@ -393,6 +395,7 @@ def pick_from_list(
     return pick
 
 
+# ✅ FIX: ui_detail.py expects these
 def pick_owner(
     label: str,
     key: str,
@@ -449,200 +452,106 @@ def resolve_owner_id(owner_display: str, employees: List[Dict[str, Any]]) -> str
     return ""
 
 
+
+
+def safe_container() -> Any:
+    return st.container()
+
+
+def segmented(label: str, options: List[str], key: str, index: int = 0) -> str:
+    # lightweight segmented control replacement
+    return st.radio(label, options=options, key=key, index=index, horizontal=True)
+
+
 def appointment_label(s: TaskSeries) -> str:
-    title = getattr(s, "title", "")
-    loc = getattr(s, "location", "")
-    t0 = getattr(s, "time_start", "")
-    t1 = getattr(s, "time_end", "")
-    bits = [b for b in [title, f"{t0}-{t1}" if (t0 or t1) else "", loc] if b]
+    title = getattr(s, "title", "") or ""
+    loc = getattr(s, "location", "") or ""
+    t0 = getattr(s, "time_start", "") or ""
+    t1 = getattr(s, "time_end", "") or ""
+    bits = [b for b in [title, (f"{t0}-{t1}" if (t0 or t1) else ""), loc] if b]
     return " · ".join(bits)
 
 
-def capacity_summary(
-    tasks_all: List[TaskSeries],
-    employees: List[Dict[str, Any]],
-    today: date,
-    window: str = "week",
-    default_capacity_per_day: float = 5.0,
-    **kwargs: Any,
-) -> Dict[str, Any]:
-    return core_capacity_summary(
-        tasks_all,
-        employees=employees,
-        today=today,
-        window=window,
-        default_capacity_per_day=default_capacity_per_day,
-        **kwargs,
-    )
+def save_series(series: List[TaskSeries]) -> None:
+    # Canonical write-back for admin/tools.
+    st.session_state.series = list(series or [])
+    persist()
 
 
-# =========================================================
-# Burndown API compatibility (ui_burndown expects this)
-# =========================================================
-def series_total_units(s: TaskSeries) -> float:
-    m = getattr(s, "meta", {}) or {}
-    if isinstance(m, dict):
-        for k in ("units", "weight", "task_weight"):
-            if k in m and m[k] is not None:
-                try:
-                    return float(m[k])
-                except Exception:
-                    pass
-    return 1.0
-
-
-def _is_workday(d: date) -> bool:
-    return d.weekday() < 5
-
-
-def _workdays_between_inclusive(a: date, b: date) -> int:
-    if a > b:
-        return 0
-    d = a
-    n = 0
-    while d <= b:
-        if _is_workday(d):
-            n += 1
-        d += timedelta(days=1)
-    return max(1, n)
-
-
-def _workday_range(a: date, b: date) -> List[date]:
-    out: List[date] = []
-    d = a
-    while d <= b:
-        if _is_workday(d):
-            out.append(d)
-        d += timedelta(days=1)
-    return out
-
-
-def _add_workdays(start: date, n: int) -> date:
-    if n <= 0:
-        return start
-    d = start
-    added = 0
-    while added < n:
-        d += timedelta(days=1)
-        if _is_workday(d):
-            added += 1
-    return d
-
-
-def compute_units_composition(tasks: List[TaskSeries]):
-    if not tasks:
-        return [], [], [], 0.0
-
-    start = min(s.start for s in tasks)
-    end = max(s.end for s in tasks)
-    all_days = _workday_range(start, end)
-    if not all_days:
-        return [], [], [], 0.0
-
-    total_scope = float(sum(series_total_units(s) for s in tasks))
-
-    per_day_units: Dict[str, float] = {}
-    for s in tasks:
-        wd = _workdays_between_inclusive(s.start, s.end)
-        per_day_units[s.series_id] = float(series_total_units(s)) / float(wd)
-
-    done_u: List[float] = []
-    cum_done = 0.0
-    rem_u: List[float] = []
-
-    for d in all_days:
-        day_done = 0.0
-        for s in tasks:
-            if s.start <= d <= s.end and _is_workday(d):
-                dd = getattr(s, "done_days", set()) or set()
-                if isinstance(dd, set) and d in dd:
-                    day_done += per_day_units.get(s.series_id, 0.0)
-
-        done_u.append(float(day_done))
-        cum_done += float(day_done)
-        rem_u.append(max(0.0, total_scope - cum_done))
-
-    return all_days, done_u, rem_u, total_scope
-
-
-def forecast_eta_units(all_days, done_u, rem_u, today: date, window_workdays: int = 10):
-    if not all_days or not rem_u:
-        return today, 0.0, None, 0
-
-    idx = 0
-    for i, d in enumerate(all_days):
-        if d <= today:
-            idx = i
-        else:
-            break
-
-    rem_today = float(rem_u[idx]) if idx < len(rem_u) else 0.0
-
-    w_end = idx
-    w_start = max(0, w_end - int(window_workdays) + 1)
-    win_days = all_days[w_start : w_end + 1]
-    win_done = done_u[w_start : w_end + 1] if done_u else []
-
-    if not win_days:
-        return today, 0.0, None, 0
-
-    vel = float(sum(float(x) for x in win_done)) / float(len(win_days)) if len(win_days) > 0 else 0.0
-    dq = sum(1 for x in win_done if float(x) > 0.0)
-
-    if vel <= 0.0:
-        return today, 0.0, None, dq
-
-    eta_days = int((rem_today / vel) + 0.999999)
-    eta = _add_workdays(today, eta_days)
-    return today, vel, eta, dq
-
-
-# REQUIRED by ui_kanban.py
 def request_done_single(series_id: str, day: date, reason: str = "") -> None:
+    # Queue a single DONE request (confirmation handled in sidebar).
     st.session_state.done_requests = st.session_state.get("done_requests", [])
-    st.session_state.done_requests.append({"series_id": series_id, "day_iso": day.isoformat(), "reason": reason or ""})
+    st.session_state.done_requests.append({
+        "series_id": str(series_id),
+        "day_iso": day.isoformat(),
+        "reason": reason or "",
+    })
 
 
 def request_done_grid(items: List[Dict[str, str]], reason: str = "") -> None:
+    # Queue multiple DONE requests.
     st.session_state.done_requests = st.session_state.get("done_requests", [])
-    for it in items:
-        st.session_state.done_requests.append({"series_id": it["series_id"], "day_iso": it["day_iso"], "reason": reason})
-
-
+    for it in items or []:
+        sid = str(it.get("series_id", "") or "")
+        day_iso = str(it.get("day_iso", "") or "")
+        if not sid or not day_iso:
+            continue
+        st.session_state.done_requests.append({
+            "series_id": sid,
+            "day_iso": day_iso,
+            "reason": reason or "",
+        })
 def handle_done_requests() -> None:
+    # Confirmation queue for DONE requests coming from Kanban/Employees/Detail.
+    # Backward-compat: if legacy _done_request exists, convert it into the queue.
+    legacy = st.session_state.pop("_done_request", None)
+    if legacy and isinstance(legacy, dict):
+        sid = str(legacy.get("series_id", "") or "")
+        day_iso = str(legacy.get("day_iso", "") or "")
+        do = bool(legacy.get("done", True))
+        if sid and day_iso and do:
+            st.session_state.done_requests = st.session_state.get("done_requests", [])
+            st.session_state.done_requests.append({"series_id": sid, "day_iso": day_iso, "reason": "legacy"})
+
     reqs = st.session_state.get("done_requests", [])
     if not reqs:
         return
+
     with st.sidebar.expander("✅ Quittierung nötig", expanded=True):
         st.caption("Es gibt DONE-Anfragen, die bestätigt werden müssen.")
         keep = []
-        for i, r in enumerate(reqs):
-            sid = r.get("series_id", "")
-            day_iso = r.get("day_iso", "")
-            reason = r.get("reason", "")
+        for i, r in enumerate(list(reqs)):
+            sid = str(r.get("series_id", "") or "")
+            day_iso = str(r.get("day_iso", "") or "")
+            reason = str(r.get("reason", "") or "")
+            if not sid or not day_iso:
+                continue
             try:
                 s = find_series(sid)
             except Exception:
                 continue
-            row = st.columns([6, 2, 2])
-            row[0].write(f"**{s.title}** · {day_iso}")
+            cols = st.columns([6, 2, 2])
+            cols[0].write(f"**{getattr(s, 'title', '')}** · {day_iso}")
             if reason:
-                row[0].caption(reason)
-            if row[1].button("✅ Quittieren", key=f"done_ok_{i}_{sid}_{day_iso}", type="primary", use_container_width=True):
-                mark_done(s, date.fromisoformat(day_iso))
-                persist()
-            elif row[2].button("✋ Ablehnen", key=f"done_no_{i}_{sid}_{day_iso}", type="secondary", use_container_width=True):
-                pass
-            else:
-                keep.append(r)
+                cols[0].caption(reason)
+            ok_key = f"done_ok_{i}_{sid}_{day_iso}"
+            no_key = f"done_no_{i}_{sid}_{day_iso}"
+            if cols[1].button("✅ Quittieren", key=ok_key, type="primary", use_container_width=True):
+                try:
+                    d = date.fromisoformat(day_iso)
+                    mark_done(s, d)
+                    persist()
+                except Exception:
+                    pass
+                st.rerun()
+            if cols[2].button("✋ Ablehnen", key=no_key, type="secondary", use_container_width=True):
+                st.rerun()
+            keep.append(r)
+
         st.session_state.done_requests = keep
 
 
-# ------------------ Streamlit setup ------------------
-st.set_page_config(page_title=APP_TITLE, layout="wide")
-
-if "initialized" not in st.session_state:
-    st.session_state.initialized = True
+if "page" not in st.session_state:
     st.session_state.page = "HOME"
     st.session_state.page_prev = "HOME"
     st.session_state.open_series = None
@@ -658,9 +567,11 @@ if "initialized" not in st.session_state:
 
 today = date.today()
 
-# ------------------ Sidebar (header + quick stats) ------------------
 st.sidebar.title(APP_TITLE)
 
+st.sidebar.caption(
+    f"App v{__version__} · Core v{getattr(__import__('core'), '__version__', 'n/a')} · Gantt v{getattr(__import__('ui_gantt'), '__version__', 'n/a')}"
+)
 with st.sidebar.expander("Versionen", expanded=False):
     st.markdown(
         "\n".join(
@@ -673,7 +584,7 @@ with st.sidebar.expander("Versionen", expanded=False):
     )
 
 st.session_state.focus_mode = st.sidebar.toggle(
-    "Focus mode (only active tasks,\nno META, no appointments)",
+    "Focus mode (only active tasks, no META, no appointments)",
     value=bool(st.session_state.get("focus_mode", False)),
     key="focus_mode_toggle",
 )
@@ -702,9 +613,9 @@ if isinstance(_notice, dict) and _notice.get("value"):
 with st.sidebar.expander("Hilfe", expanded=False):
     st.button("❓ Hilfe", key="help_btn")
     st.button("🧙 Anfänger", key="beginner_btn")
-    st.caption("Hilfe ist kontextsensitiv: öffnet automatisch\nden passenden Abschnitt zur aktuellen\nSeite.")
+    st.caption("Hilfe ist kontextsensitiv.")
 
-# ------------------ Navigation ------------------
+
 NAV_SECTIONS = [
     ("Start", [("Home", "HOME")]),
     ("Work", [("Kanban", "KANBAN"), ("Gantt", "GANTT"), ("Burndown", "BURNDOWN"), ("Dashboard", "DASHBOARD")]),
@@ -761,65 +672,67 @@ if picked_page != st.session_state.page:
         st.session_state.open_series = None
     st.rerun()
 
-# ------------------ Page render context ------------------
+
 ctx = {
     "today": today,
     "persist": persist,
     "sync_lists_from_data": sync_lists_from_data,
     "visible_series": visible_series,
     "find_series": find_series,
+    "delete_series": delete_series,
     "open_detail": open_detail,
     "close_detail": close_detail,
-    "delete_series": delete_series,
-    "new_series": new_series,
-    "new_part": new_part,
+    "employees": st.session_state.employees,
+    "lists": st.session_state.lists,
+    "save_employees": save_employees,
+    "save_lists": save_lists,
+    "pick_from_list": pick_from_list,
+
+    # ✅ FIX for ui_detail.py
+    "pick_owner": pick_owner,
+    "resolve_owner_id": resolve_owner_id,
+
+    "gantt_items": gantt_items,
     "is_task": is_task,
     "is_appointment": is_appointment,
     "is_completed": is_completed,
     "is_overdue": is_overdue,
     "is_active": is_active,
     "progress_percent": progress_percent,
-    "gantt_items": gantt_items,
+    "total_days": total_days,
     "would_create_cycle": would_create_cycle,
     "can_depend_series": can_depend_series,
-    "total_days": total_days,
-    "bulk_set_done": bulk_set_done,
-    "mark_done": mark_done,
-    "unmark_done": unmark_done,
-    "appointment_label": appointment_label,
-    "pick_from_list": pick_from_list,
-    "pick_owner": pick_owner,
-
-    # Kanban contract
-    "request_done_single": request_done_single,
-    "request_done_grid": request_done_grid,
-
-    "employees": st.session_state.employees,
-    "lists": st.session_state.lists,
-    "capacity_summary": capacity_summary,
-
-    # Burndown contract
+    "capacity_summary": core_capacity_summary,
     "compute_units_composition": compute_units_composition,
-    "forecast_eta_units": forecast_eta_units,
-    "series_total_units": series_total_units,
-
-    # other analytics
     "build_burndown_series": build_burndown_series,
     "calc_velocity": calc_velocity,
     "forecast_finish_date": forecast_finish_date,
+    "forecast_eta_units": forecast_eta_units,
 
     # required by ui_data.py
-    "series": st.session_state.series,
-    "save_employees": save_employees,
-    "save_lists": save_lists,
-    "resolve_owner_id": resolve_owner_id,
     "DATA_FILE": str(STATE_PATH),
     "EMP_FILE": str(EMP_PATH),
     "LISTS_FILE": str(LISTS_PATH),
+
+
+    # ---- additional ctx contract keys (required by other UI modules)
+    "series": st.session_state.series,
+    "save_series": save_series,
+    "new_series": new_series,
+    "new_part": new_part,
+    "bulk_set_done": bulk_set_done,
+    "mark_done": mark_done,
+    "unmark_done": unmark_done,
+    "request_done_single": request_done_single,
+    "request_done_grid": request_done_grid,
+    "series_total_units": getattr(__import__('core'), 'series_units', None),
+    "safe_container": safe_container,
+    "segmented": segmented,
+    "appointment_label": appointment_label,
 }
 
-# ------------------ Main render ------------------
 page = st.session_state.page
+
 if page == "HOME":
     render_home(ctx)
 elif page == "KANBAN":
