@@ -11,7 +11,6 @@ import streamlit as st
 from core import TaskSeries, would_create_cycle
 
 try:
-    # exists in your core.py
     from core import critical_path_series  # type: ignore
 except Exception:
     critical_path_series = None  # type: ignore
@@ -46,7 +45,6 @@ def _series_label(s: TaskSeries) -> str:
 
 
 def _get_series_list(ctx: dict) -> List[TaskSeries]:
-    # Prefer ctx.visible_series() (respects focus mode), else session_state.series
     vs = ctx.get("visible_series")
     if callable(vs):
         try:
@@ -64,7 +62,6 @@ def _get_today(ctx: dict) -> date:
 
 
 def _get_preds(s: TaskSeries) -> List[str]:
-    # Unified read of predecessor IDs (supports both s.predecessors and s.meta["predecessors"])
     preds: List[str] = []
     try:
         v = getattr(s, "predecessors", None)
@@ -83,7 +80,6 @@ def _get_preds(s: TaskSeries) -> List[str]:
         except Exception:
             pass
 
-    # de-dup, keep order
     out: List[str] = []
     seen = set()
     for p in preds:
@@ -96,13 +92,11 @@ def _get_preds(s: TaskSeries) -> List[str]:
 
 def _set_preds(s: TaskSeries, pred_ids: List[str]) -> None:
     pred_ids = [str(x).strip() for x in (pred_ids or []) if str(x).strip()]
-    # write to s.predecessors if it exists
     if hasattr(s, "predecessors"):
         try:
             setattr(s, "predecessors", list(pred_ids))
         except Exception:
             pass
-    # always mirror into meta["predecessors"] for robustness / export
     try:
         m = getattr(s, "meta", {}) or {}
         if not isinstance(m, dict):
@@ -131,7 +125,6 @@ def _is_completed(s: TaskSeries, ctx: dict, today: date) -> bool:
             return bool(fn(s, today))
         except Exception:
             pass
-    # fallback: 100% progress if available
     fnp = ctx.get("progress_percent")
     if callable(fnp):
         try:
@@ -200,15 +193,12 @@ def _render_dependency_editor(ctx: dict, series_filtered: List[TaskSeries]) -> N
     pred_ids = [str(getattr(p, "series_id", "") or "").strip() for p in picked]
     pred_ids = [p for p in pred_ids if p and p != succ_id]
 
-    # validation: no cycles
     for pid in pred_ids:
         try:
-            # NOTE: core.py signature differs across versions; this is best-effort.
             if would_create_cycle(series_filtered, src_id=pid, tgt_id=succ_id):
                 st.error("Ungültig: Diese Abhängigkeit würde einen Zyklus erzeugen.")
                 return
         except Exception:
-            # if core changes, fail safe: allow save but warn
             st.warning("Zyklus-Check nicht verfügbar/fehlgeschlagen – bitte vorsichtig.")
             break
 
@@ -251,7 +241,6 @@ def _plot_gantt(
     show_deps: bool,
     show_critical: bool,
 ) -> None:
-    # sort for stable layout
     def sort_key(it: Dict[str, Any]) -> Tuple[str, str, str]:
         s = series_by_id.get(str(it.get("id") or "").strip())
         project = (getattr(s, "project", "") or "").strip() if s else (str(it.get("project") or "").strip())
@@ -261,7 +250,6 @@ def _plot_gantt(
 
     items_sorted = sorted(items, key=sort_key)
 
-    # filter by window overlap
     filtered: List[Dict[str, Any]] = []
     for it in items_sorted:
         stt = _safe_date(it.get("start"))
@@ -272,12 +260,10 @@ def _plot_gantt(
             continue
         filtered.append(it)
 
-    # If dependencies are shown, ensure predecessors are included so arrows can be drawn.
-    # Otherwise arrows disappear when a predecessor is outside the current window.
     plot_from = win_from
     plot_to = win_to
+
     if show_deps and filtered:
-        # build quick index from item id -> item
         item_by_id: Dict[str, Dict[str, Any]] = {}
         for it in items_sorted:
             sid = str(it.get("id") or "").strip()
@@ -300,7 +286,6 @@ def _plot_gantt(
                     to_add.append(pid)
 
         if to_add:
-            # keep original sort order by scanning items_sorted
             new_filtered: List[Dict[str, Any]] = []
             for it in items_sorted:
                 sid = str(it.get("id") or "").strip()
@@ -308,7 +293,6 @@ def _plot_gantt(
                     new_filtered.append(it)
             filtered = new_filtered
 
-            # expand x-axis only as needed so newly included dependency bars/arrows are visible
             starts = [_safe_date(it.get("start")) for it in filtered]
             ends = [_safe_date(it.get("end")) for it in filtered]
             starts = [d for d in starts if d]
@@ -321,7 +305,6 @@ def _plot_gantt(
         st.info("Keine Tasks im gewählten Zeitraum.")
         return
 
-    # critical path ids
     crit_ids = set()
     if show_critical and callable(critical_path_series):
         try:
@@ -329,7 +312,6 @@ def _plot_gantt(
         except Exception:
             crit_ids = set()
 
-    # map y positions
     ymap: Dict[str, int] = {}
     labels: List[str] = []
     for i, it in enumerate(filtered):
@@ -341,7 +323,6 @@ def _plot_gantt(
     fig_h = max(4.0, min(0.45 * len(filtered) + 2.5, 18.0))
     fig, ax = plt.subplots(figsize=(14, fig_h))
 
-    # draw bars
     for it in filtered:
         sid = str(it.get("id") or "").strip()
         s = series_by_id.get(sid)
@@ -352,14 +333,13 @@ def _plot_gantt(
 
         y = ymap[sid]
         left = mdates.date2num(stt)
-        right = mdates.date2num(en + timedelta(days=1))  # inclusive end
+        right = mdates.date2num(en + timedelta(days=1))
         width = max(0.5, right - left)
 
         is_meta = bool(getattr(s, "is_meta", False)) if s else bool(it.get("is_meta", False))
         prog = _progress(s, ctx) if s else float(it.get("progress", 0.0) or 0.0)
         done = prog >= 100.0
 
-        # style via alpha/hatch (no fixed colors)
         alpha = 0.35 if is_meta else (0.20 if done else 0.85)
         hatch = "///" if (sid in crit_ids and not done) else ("")
 
@@ -374,7 +354,6 @@ def _plot_gantt(
             linewidth=0.6,
         )
 
-        # progress marker (thin bar inside)
         if prog > 0.0:
             inner_w = width * min(1.0, max(0.0, prog / 100.0))
             ax.barh(
@@ -387,14 +366,11 @@ def _plot_gantt(
                 linewidth=0.3,
             )
 
-    # today line
     ax.axvline(mdates.date2num(today), linestyle="--", linewidth=1.0)
 
     # deps arrows
     if show_deps:
-        # IMPORTANT: use the actually plotted window (plot_from/plot_to),
-        # not the UI-selected window (win_from/win_to), because we may have
-        # auto-included predecessors outside the selected window.
+        # ✅ FIX: use the actually plotted range (plot_from/plot_to), not the UI window (win_from/win_to)
         plot_min = mdates.date2num(plot_from)
         plot_max = mdates.date2num(plot_to + timedelta(days=1))
 
@@ -411,8 +387,7 @@ def _plot_gantt(
             if not succ_start:
                 continue
 
-            preds = _get_preds(s)
-            for pid in preds:
+            for pid in _get_preds(s):
                 if pid not in ymap:
                     continue
                 pred = series_by_id.get(pid)
@@ -422,13 +397,12 @@ def _plot_gantt(
                 if not pred_end:
                     continue
 
-                # draw from pred_end to succ_start
                 x0 = mdates.date2num(pred_end + timedelta(days=1))
                 x1 = mdates.date2num(succ_start)
                 y0 = ymap[pid]
                 y1 = succ_y
 
-                # keep only arrows that intersect the plotted x-range
+                # ✅ FIX: intersect with plotted range
                 if max(x0, x1) < plot_min or min(x0, x1) > plot_max:
                     continue
 
@@ -436,10 +410,10 @@ def _plot_gantt(
                     "",
                     xy=(x1, y1),
                     xytext=(x0, y0),
-                    arrowprops=dict(arrowstyle="->", linewidth=0.8),
+                    # slightly more visible arrow head + width
+                    arrowprops=dict(arrowstyle="-|>", linewidth=1.2, mutation_scale=12),
                 )
 
-    # axes formatting
     ax.set_yticks(list(range(len(labels))))
     ax.set_yticklabels(labels, fontsize=9)
 
@@ -462,16 +436,13 @@ def render(ctx: dict) -> None:
     st.title("Gantt")
 
     open_detail = ctx.get("open_detail")
-
     today = _get_today(ctx)
 
-    # load series
     series_all = _get_series_list(ctx)
     if not series_all:
         st.info("Noch keine Tasks vorhanden.")
         return
 
-    # keep only tasks/appointments that have start/end and id
     cleaned: List[TaskSeries] = []
     for s in series_all:
         sid = str(getattr(s, "series_id", "") or "").strip()
@@ -485,7 +456,6 @@ def render(ctx: dict) -> None:
         st.info("Keine gültigen Tasks (fehlende series_id/start/end).")
         return
 
-    # build items via core.gantt_items if available in ctx, else minimal fallback
     gantt_fn = ctx.get("gantt_items")
     items: List[Dict[str, Any]] = []
     if callable(gantt_fn):
@@ -496,7 +466,6 @@ def render(ctx: dict) -> None:
         except Exception:
             items = []
     if not items:
-        # fallback
         for s in cleaned:
             items.append(
                 {
@@ -516,7 +485,6 @@ def render(ctx: dict) -> None:
     series_by_id = {str(getattr(s, "series_id", "") or "").strip(): s for s in cleaned}
     series_by_id = {k: v for k, v in series_by_id.items() if k}
 
-    # filters
     with st.expander("Filters & Zeitraum", expanded=True):
         portfolios = sorted({(getattr(s, "portfolio", "") or "").strip() for s in cleaned if (getattr(s, "portfolio", "") or "").strip()})
         projects = sorted({(getattr(s, "project", "") or "").strip() for s in cleaned if (getattr(s, "project", "") or "").strip()})
@@ -536,7 +504,6 @@ def render(ctx: dict) -> None:
         show_deps = st.checkbox("Dependencies-Pfeile anzeigen", value=True, key="gantt_show_deps")
         show_crit = st.checkbox("Kritischen Pfad markieren (Hatch)", value=True, key="gantt_show_crit")
 
-        # compute window defaults based on currently filtered set later; use broad defaults first
         win_def_from, win_def_to = _compute_window_defaults(items, today)
         rng = st.date_input(
             "Zeitraum (From / To)",
@@ -574,7 +541,6 @@ def render(ctx: dict) -> None:
     allowed = set(str(getattr(s, "series_id", "") or "").strip() for s in series_filtered)
     items_filtered = [it for it in items if str(it.get("id") or it.get("series_id") or "").strip() in allowed]
 
-    # normalize item keys minimally (id/start/end)
     norm_items: List[Dict[str, Any]] = []
     for it in items_filtered:
         sid = str(it.get("id") or it.get("series_id") or "").strip()
@@ -601,11 +567,9 @@ def render(ctx: dict) -> None:
         st.error("Zeitraum ungültig: From > To.")
         return
 
-    # dependency editor
     with st.expander("➕ Dependencies bearbeiten", expanded=False):
         _render_dependency_editor(ctx, series_filtered)
 
-    # plot
     st.markdown("---")
     st.caption("Tipp: Wenn du Pfeile nicht siehst, liegt’s fast immer daran, dass Pred oder Succ außerhalb des Zeitfensters gefiltert ist.")
     _plot_gantt(
@@ -619,17 +583,28 @@ def render(ctx: dict) -> None:
         show_critical=show_crit,
     )
 
-    with st.expander('Open details (klick auf Titel)', expanded=False):
+    with st.expander("Open details (klick auf Titel)", expanded=False):
         if callable(open_detail):
-            q = st.text_input('Filter', placeholder='search title…', key='gantt_open_filter')
+            q = st.text_input("Filter", placeholder="search title…", key="gantt_open_filter")
             shown = list(series_filtered)
             if q:
                 qq = q.lower()
-                shown = [s for s in shown if qq in ((getattr(s,'title','') or '') + ' ' + (getattr(s,'project','') or '') + ' ' + (getattr(s,'owner','') or '')).lower()]
+                shown = [
+                    s
+                    for s in shown
+                    if qq
+                    in (
+                        (getattr(s, "title", "") or "")
+                        + " "
+                        + (getattr(s, "project", "") or "")
+                        + " "
+                        + (getattr(s, "owner", "") or "")
+                    ).lower()
+                ]
             for s in shown[:50]:
-                sid = str(getattr(s,'series_id','') or '').strip()
+                sid = str(getattr(s, "series_id", "") or "").strip()
                 if not sid:
                     continue
-                if st.button(str(getattr(s,'title','') or ''), key=f'gantt_open_{sid}', use_container_width=True):
+                if st.button(str(getattr(s, "title", "") or ""), key=f"gantt_open_{sid}", use_container_width=True):
                     open_detail(sid)
                 st.caption(f"{getattr(s,'project','')} · {getattr(s,'owner','')} · {getattr(s,'start','')}→{getattr(s,'end','')}")
