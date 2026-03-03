@@ -51,8 +51,7 @@ from ui_gantt import render as render_gantt
 from ui_home import render as render_home
 from ui_kanban import render as render_kanban
 
-
-__version__ = "2026.03.03.4"
+__version__ = "2026.03.03.5"
 
 APP_TITLE = "OMG Coop"
 
@@ -89,6 +88,16 @@ def _list_union(a: List[str], b: List[str]) -> List[str]:
 
 
 def load_employees() -> List[Dict[str, Any]]:
+    """Load employees from employees.json.
+
+    Historical compatibility:
+    - canonical: list[dict]
+    - some exports/imports: {"schema_version": 1, "employees": [...]}
+    - legacy/dirty: list[str] (names) or list[str(dict-repr)]
+
+    Output is normalized into: list[{id, display_name, aliases}]
+    """
+
     def _slugify(s: str) -> str:
         s = (s or "").strip().lower()
         out = []
@@ -103,15 +112,18 @@ def load_employees() -> List[Dict[str, Any]]:
         return v or "unknown"
 
     def _maybe_parse_dict_string(s: str) -> Dict[str, Any] | None:
+        """Best-effort parse of a string that looks like a dict (python or json)."""
         s = (s or "").strip()
         if not (s.startswith("{") and s.endswith("}")):
             return None
+        # Try JSON first
         try:
             d = json.loads(s)
             if isinstance(d, dict):
                 return d
         except Exception:
             pass
+        # Try python literal
         try:
             import ast
 
@@ -130,6 +142,7 @@ def load_employees() -> List[Dict[str, Any]]:
     except Exception:
         return []
 
+    # unwrap schema container if present
     if isinstance(raw, dict) and isinstance(raw.get("employees"), list):
         raw_list = raw.get("employees", [])
     elif isinstance(raw, list):
@@ -142,7 +155,9 @@ def load_employees() -> List[Dict[str, Any]]:
 
     for item in raw_list:
         try:
+            # item can be dict or string
             if isinstance(item, str):
+                # could be a dict-repr string
                 d = _maybe_parse_dict_string(item)
                 if isinstance(d, dict):
                     item = d
@@ -160,6 +175,8 @@ def load_employees() -> List[Dict[str, Any]]:
             if not isinstance(item, dict):
                 continue
 
+            # Some broken states had display_name containing the whole dict as a string.
+            # Try to recover it.
             dn_raw = str(item.get("display_name", "") or "").strip()
             if dn_raw.startswith("{") and "display_name" in dn_raw:
                 d2 = _maybe_parse_dict_string(dn_raw)
@@ -387,7 +404,6 @@ def pick_from_list(
     return pick
 
 
-# ✅ FIX: ui_detail.py expects these
 def pick_owner(
     label: str,
     key: str,
@@ -444,27 +460,114 @@ def resolve_owner_id(owner_display: str, employees: List[Dict[str, Any]]) -> str
     return ""
 
 
+def appointment_label(s: TaskSeries) -> str:
+    title = getattr(s, "title", "")
+    loc = getattr(s, "location", "")
+    t0 = getattr(s, "time_start", "")
+    t1 = getattr(s, "time_end", "")
+    bits = [b for b in [title, f"{t0}-{t1}" if (t0 or t1) else "", loc] if b]
+    return " · ".join(bits)
+
+
+def segmented(label: str, options: List[str], key: str, index: int = 0) -> str:
+    # simple fallback segmented control
+    return st.radio(label, options=options, key=key, index=index, horizontal=True)
+
+
+def safe_container() -> Any:
+    return st.container()
+
+
+def week_window(today: date) -> Tuple[date, date]:
+    start = today - timedelta(days=today.weekday())
+    end = start + timedelta(days=6)
+    return start, end
+
+
+def capacity_summary(
+    tasks_all: List[TaskSeries],
+    employees: List[Dict[str, Any]],
+    today: date,
+    window: str = "week",
+    default_capacity_per_day: float = 5.0,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    return core_capacity_summary(
+        tasks_all,
+        employees=employees,
+        today=today,
+        window=window,
+        default_capacity_per_day=default_capacity_per_day,
+        **kwargs,
+    )
+
+
+def compute_done_composition(tasks: List[TaskSeries]):
+    return compute_units_composition(tasks)
+
+
+def forecast_eta(all_days, done_per_day, remaining_per_day, today: date, window_business_days: int = 10):
+    return forecast_eta_units(all_days, done_per_day, remaining_per_day, today, window_business_days)
+
+
+# ✅ REQUIRED by ui_kanban.py
+def request_done_single(series_id: str, day: date, reason: str = "") -> None:
+    st.session_state.done_requests = st.session_state.get("done_requests", [])
+    st.session_state.done_requests.append({"series_id": series_id, "day_iso": day.isoformat(), "reason": reason or ""})
+
+
+# ✅ REQUIRED by ui_kanban.py
+def request_done_grid(items: List[Dict[str, str]], reason: str = "") -> None:
+    st.session_state.done_requests = st.session_state.get("done_requests", [])
+    for it in items:
+        st.session_state.done_requests.append({"series_id": it["series_id"], "day_iso": it["day_iso"], "reason": reason})
+
+
 def handle_done_requests() -> None:
-    req = st.session_state.pop("_done_request", None)
-    if not req:
+    reqs = st.session_state.get("done_requests", [])
+    if not reqs:
         return
-    try:
-        series_id = req.get("series_id")
-        day_iso = req.get("day_iso")
-        do = bool(req.get("done"))
-        if series_id and day_iso:
-            s = find_series(series_id)
-            d = date.fromisoformat(day_iso)
-            if do:
-                mark_done(s, d)
+    with st.sidebar.expander("✅ Quittierung nötig", expanded=True):
+        st.caption("Es gibt DONE-Anfragen, die bestätigt werden müssen.")
+        keep = []
+        for i, r in enumerate(reqs):
+            sid = r.get("series_id", "")
+            day_iso = r.get("day_iso", "")
+            reason = r.get("reason", "")
+            try:
+                s = find_series(sid)
+            except Exception:
+                continue
+            row = st.columns([6, 2, 2])
+            row[0].write(f"**{s.title}** · {day_iso}")
+            if reason:
+                row[0].caption(reason)
+            if row[1].button(
+                "✅ Quittieren",
+                key=f"done_ok_{i}_{sid}_{day_iso}",
+                type="primary",
+                use_container_width=True,
+            ):
+                mark_done(s, date.fromisoformat(day_iso))
+                persist()
+            elif row[2].button(
+                "✋ Ablehnen",
+                key=f"done_no_{i}_{sid}_{day_iso}",
+                type="secondary",
+                use_container_width=True,
+            ):
+                pass
             else:
-                unmark_done(s, d)
-            persist()
-    except Exception:
-        pass
+                keep.append(r)
+        st.session_state.done_requests = keep
 
 
-if "page" not in st.session_state:
+# ------------------ Streamlit setup ------------------
+
+st.set_page_config(page_title=APP_TITLE, layout="wide")
+
+if "initialized" not in st.session_state:
+    st.session_state.initialized = True
     st.session_state.page = "HOME"
     st.session_state.page_prev = "HOME"
     st.session_state.open_series = None
@@ -480,11 +583,10 @@ if "page" not in st.session_state:
 
 today = date.today()
 
+# ------------------ Sidebar (header + quick stats) ------------------
+
 st.sidebar.title(APP_TITLE)
 
-st.sidebar.caption(
-    f"App v{__version__} · Core v{getattr(__import__('core'), '__version__', 'n/a')} · Gantt v{getattr(__import__('ui_gantt'), '__version__', 'n/a')}"
-)
 with st.sidebar.expander("Versionen", expanded=False):
     st.markdown(
         "\n".join(
@@ -497,7 +599,7 @@ with st.sidebar.expander("Versionen", expanded=False):
     )
 
 st.session_state.focus_mode = st.sidebar.toggle(
-    "Focus mode (only active tasks, no META, no appointments)",
+    "Focus mode (only active tasks,\nno META, no appointments)",
     value=bool(st.session_state.get("focus_mode", False)),
     key="focus_mode_toggle",
 )
@@ -526,8 +628,9 @@ if isinstance(_notice, dict) and _notice.get("value"):
 with st.sidebar.expander("Hilfe", expanded=False):
     st.button("❓ Hilfe", key="help_btn")
     st.button("🧙 Anfänger", key="beginner_btn")
-    st.caption("Hilfe ist kontextsensitiv.")
+    st.caption("Hilfe ist kontextsensitiv: öffnet automatisch\nden passenden Abschnitt zur aktuellen\nSeite.")
 
+# ------------------ Navigation ------------------
 
 NAV_SECTIONS = [
     ("Start", [("Home", "HOME")]),
@@ -585,52 +688,63 @@ if picked_page != st.session_state.page:
         st.session_state.open_series = None
     st.rerun()
 
+# ------------------ Page render context ------------------
 
+# NOTE: keep ctx complete; ui_* modules assume keys exist.
 ctx = {
     "today": today,
     "persist": persist,
     "sync_lists_from_data": sync_lists_from_data,
     "visible_series": visible_series,
     "find_series": find_series,
-    "delete_series": delete_series,
     "open_detail": open_detail,
     "close_detail": close_detail,
-    "employees": st.session_state.employees,
-    "lists": st.session_state.lists,
-    "save_employees": save_employees,
-    "save_lists": save_lists,
-    "pick_from_list": pick_from_list,
-
-    # ✅ FIX for ui_detail.py
-    "pick_owner": pick_owner,
-    "resolve_owner_id": resolve_owner_id,
-
-    "gantt_items": gantt_items,
+    "delete_series": delete_series,
+    "new_series": new_series,
+    "new_part": new_part,
     "is_task": is_task,
     "is_appointment": is_appointment,
     "is_completed": is_completed,
     "is_overdue": is_overdue,
     "is_active": is_active,
     "progress_percent": progress_percent,
-    "total_days": total_days,
+    "gantt_items": gantt_items,
     "would_create_cycle": would_create_cycle,
     "can_depend_series": can_depend_series,
-    "capacity_summary": core_capacity_summary,
+    "total_days": total_days,
+    "bulk_set_done": bulk_set_done,
+    "mark_done": mark_done,
+    "unmark_done": unmark_done,
+    "appointment_label": appointment_label,
+    "pick_from_list": pick_from_list,
+    "pick_owner": pick_owner,
+
+    # ✅ FIX for ui_kanban.py
+    "request_done_single": request_done_single,
+    "request_done_grid": request_done_grid,
+
+    "employees": st.session_state.employees,
+    "lists": st.session_state.lists,
+    "capacity_summary": capacity_summary,
     "compute_units_composition": compute_units_composition,
     "build_burndown_series": build_burndown_series,
     "calc_velocity": calc_velocity,
     "forecast_finish_date": forecast_finish_date,
     "forecast_eta_units": forecast_eta_units,
 
-    # required by ui_data.py
-    "APP_VERSION": __version__,
+    # REQUIRED by ui_data.py (keep)
+    "series": st.session_state.series,
+    "save_employees": save_employees,
+    "save_lists": save_lists,
+    "resolve_owner_id": resolve_owner_id,
     "DATA_FILE": str(STATE_PATH),
     "EMP_FILE": str(EMP_PATH),
     "LISTS_FILE": str(LISTS_PATH),
 }
 
-page = st.session_state.page
+# ------------------ Main render ------------------
 
+page = st.session_state.page
 if page == "HOME":
     render_home(ctx)
 elif page == "KANBAN":
