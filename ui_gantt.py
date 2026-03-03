@@ -273,11 +273,9 @@ def _plot_gantt(
         filtered.append(it)
 
     # If dependencies are shown, ensure predecessors are included so arrows can be drawn.
-    # Otherwise arrows disappear when a predecessor is outside the current window.
     plot_from = win_from
     plot_to = win_to
     if show_deps and filtered:
-        # build quick index from item id -> item
         item_by_id: Dict[str, Dict[str, Any]] = {}
         for it in items_sorted:
             sid = str(it.get("id") or "").strip()
@@ -300,7 +298,6 @@ def _plot_gantt(
                     to_add.append(pid)
 
         if to_add:
-            # keep original sort order by scanning items_sorted
             new_filtered: List[Dict[str, Any]] = []
             for it in items_sorted:
                 sid = str(it.get("id") or "").strip()
@@ -308,7 +305,6 @@ def _plot_gantt(
                     new_filtered.append(it)
             filtered = new_filtered
 
-            # expand x-axis only as needed so newly included dependency bars/arrows are visible
             starts = [_safe_date(it.get("start")) for it in filtered]
             ends = [_safe_date(it.get("end")) for it in filtered]
             starts = [d for d in starts if d]
@@ -321,7 +317,6 @@ def _plot_gantt(
         st.info("Keine Tasks im gewählten Zeitraum.")
         return
 
-    # critical path ids
     crit_ids = set()
     if show_critical and callable(critical_path_series):
         try:
@@ -329,7 +324,6 @@ def _plot_gantt(
         except Exception:
             crit_ids = set()
 
-    # map y positions
     ymap: Dict[str, int] = {}
     labels: List[str] = []
     for i, it in enumerate(filtered):
@@ -341,7 +335,6 @@ def _plot_gantt(
     fig_h = max(4.0, min(0.45 * len(filtered) + 2.5, 18.0))
     fig, ax = plt.subplots(figsize=(14, fig_h))
 
-    # draw bars
     for it in filtered:
         sid = str(it.get("id") or "").strip()
         s = series_by_id.get(sid)
@@ -359,7 +352,6 @@ def _plot_gantt(
         prog = _progress(s, ctx) if s else float(it.get("progress", 0.0) or 0.0)
         done = prog >= 100.0
 
-        # style via alpha/hatch (no fixed colors)
         alpha = 0.35 if is_meta else (0.20 if done else 0.85)
         hatch = "///" if (sid in crit_ids and not done) else ("")
 
@@ -374,7 +366,6 @@ def _plot_gantt(
             linewidth=0.6,
         )
 
-        # progress marker (thin bar inside)
         if prog > 0.0:
             inner_w = width * min(1.0, max(0.0, prog / 100.0))
             ax.barh(
@@ -387,50 +378,54 @@ def _plot_gantt(
                 linewidth=0.3,
             )
 
-    # today line
     ax.axvline(mdates.date2num(today), linestyle="--", linewidth=1.0)
 
     # deps arrows
     if show_deps:
         # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
         # CHANGE (ONLY THIS PART):
-        # 1) Use plotted window (plot_from/plot_to) for filtering, not UI window
-        # 2) Draw arrows with guaranteed horizontal length (avoid x0==x1 collapse)
-        # 3) Ensure visibility (zorder, clip_on)
+        # - read succ_start/pred_end from the plotted items (filtered), not from series_by_id,
+        #   so arrows work even when predecessors are filtered out of series_by_id.
+        # - use plot_from/plot_to for range filtering
+        # - enforce minimum horizontal arrow length so it cannot collapse
+        # - draw on top (zorder) and disable clipping
         # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
         plot_min = mdates.date2num(plot_from)
         plot_max = mdates.date2num(plot_to + timedelta(days=1))
+
+        item_dates: Dict[str, Tuple[Optional[date], Optional[date]]] = {}
+        for it in filtered:
+            sid = str(it.get("id") or "").strip()
+            if not sid:
+                continue
+            item_dates[sid] = (_safe_date(it.get("start")), _safe_date(it.get("end")))
 
         for it in filtered:
             sid = str(it.get("id") or "").strip()
             s = series_by_id.get(sid)
             if not s:
                 continue
+
             succ_y = ymap.get(sid)
             if succ_y is None:
                 continue
 
-            succ_start = _safe_date(getattr(s, "start", None))
+            succ_start, _succ_end = item_dates.get(sid, (None, None))
             if not succ_start:
                 continue
 
-            preds = _get_preds(s)
-            for pid in preds:
-                if pid not in ymap:
+            for pid in _get_preds(s):
+                pid = str(pid).strip()
+                if not pid or pid not in ymap:
                     continue
-                pred = series_by_id.get(pid)
-                if not pred:
-                    continue
-                pred_end = _safe_date(getattr(pred, "end", None))
+
+                _pred_start, pred_end = item_dates.get(pid, (None, None))
                 if not pred_end:
                     continue
 
-                # Bars are drawn inclusive: pred ends at pred_end + 1 day (right edge).
-                # If succ starts the next day, old logic made x0==x1 => invisible arrow.
                 pred_bar_right = mdates.date2num(pred_end) + 1.0
                 succ_bar_left = mdates.date2num(succ_start)
 
-                # draw slightly inside each bar and enforce min horizontal distance
                 x0 = pred_bar_right - 0.10
                 x1 = succ_bar_left + 0.10
                 if x1 <= x0:
@@ -439,7 +434,6 @@ def _plot_gantt(
                 y0 = ymap[pid]
                 y1 = succ_y
 
-                # filter against actually plotted x-range
                 if max(x0, x1) < plot_min or min(x0, x1) > plot_max:
                     continue
 
@@ -452,7 +446,6 @@ def _plot_gantt(
                     clip_on=False,
                 )
 
-    # axes formatting
     ax.set_yticks(list(range(len(labels))))
     ax.set_yticklabels(labels, fontsize=9)
 
@@ -478,13 +471,11 @@ def render(ctx: dict) -> None:
 
     today = _get_today(ctx)
 
-    # load series
     series_all = _get_series_list(ctx)
     if not series_all:
         st.info("Noch keine Tasks vorhanden.")
         return
 
-    # keep only tasks/appointments that have start/end and id
     cleaned: List[TaskSeries] = []
     for s in series_all:
         sid = str(getattr(s, "series_id", "") or "").strip()
@@ -498,7 +489,6 @@ def render(ctx: dict) -> None:
         st.info("Keine gültigen Tasks (fehlende series_id/start/end).")
         return
 
-    # build items via core.gantt_items if available in ctx, else minimal fallback
     gantt_fn = ctx.get("gantt_items")
     items: List[Dict[str, Any]] = []
     if callable(gantt_fn):
@@ -509,7 +499,6 @@ def render(ctx: dict) -> None:
         except Exception:
             items = []
     if not items:
-        # fallback
         for s in cleaned:
             items.append(
                 {
@@ -529,7 +518,6 @@ def render(ctx: dict) -> None:
     series_by_id = {str(getattr(s, "series_id", "") or "").strip(): s for s in cleaned}
     series_by_id = {k: v for k, v in series_by_id.items() if k}
 
-    # filters
     with st.expander("Filters & Zeitraum", expanded=True):
         portfolios = sorted({(getattr(s, "portfolio", "") or "").strip() for s in cleaned if (getattr(s, "portfolio", "") or "").strip()})
         projects = sorted({(getattr(s, "project", "") or "").strip() for s in cleaned if (getattr(s, "project", "") or "").strip()})
@@ -549,7 +537,6 @@ def render(ctx: dict) -> None:
         show_deps = st.checkbox("Dependencies-Pfeile anzeigen", value=True, key="gantt_show_deps")
         show_crit = st.checkbox("Kritischen Pfad markieren (Hatch)", value=True, key="gantt_show_crit")
 
-        # compute window defaults based on currently filtered set later; use broad defaults first
         win_def_from, win_def_to = _compute_window_defaults(items, today)
         rng = st.date_input(
             "Zeitraum (From / To)",
@@ -587,7 +574,6 @@ def render(ctx: dict) -> None:
     allowed = set(str(getattr(s, "series_id", "") or "").strip() for s in series_filtered)
     items_filtered = [it for it in items if str(it.get("id") or it.get("series_id") or "").strip() in allowed]
 
-    # normalize item keys minimally (id/start/end)
     norm_items: List[Dict[str, Any]] = []
     for it in items_filtered:
         sid = str(it.get("id") or it.get("series_id") or "").strip()
@@ -614,11 +600,9 @@ def render(ctx: dict) -> None:
         st.error("Zeitraum ungültig: From > To.")
         return
 
-    # dependency editor
     with st.expander("➕ Dependencies bearbeiten", expanded=False):
         _render_dependency_editor(ctx, series_filtered)
 
-    # plot
     st.markdown("---")
     st.caption("Tipp: Wenn du Pfeile nicht siehst, liegt’s fast immer daran, dass Pred oder Succ außerhalb des Zeitfensters gefiltert ist.")
     _plot_gantt(
