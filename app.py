@@ -49,7 +49,7 @@ from ui_gantt import render as render_gantt
 from ui_home import render as render_home
 from ui_kanban import render as render_kanban
 
-__version__ = "2026.03.03.6"
+__version__ = "2026.03.03.7"
 
 APP_TITLE = "OMG Coop"
 
@@ -88,8 +88,8 @@ def _list_union(a: List[str], b: List[str]) -> List[str]:
 def load_employees() -> List[Dict[str, Any]]:
     """Load employees from employees.json.
     Supports:
-    - list[dict] canonical
-    - {"employees":[...]} container
+    - list[dict] canonical (legacy)
+    - {"employees":[...]} container (preferred)
     - legacy list[str]
     """
     def _slugify(s: str) -> str:
@@ -129,6 +129,7 @@ def load_employees() -> List[Dict[str, Any]]:
     except Exception:
         return []
 
+    # unwrap schema container if present (preferred)
     if isinstance(raw, dict) and isinstance(raw.get("employees"), list):
         raw_list = raw.get("employees", [])
     elif isinstance(raw, list):
@@ -194,7 +195,13 @@ def load_employees() -> List[Dict[str, Any]]:
 
 
 def save_employees(employees: List[Dict[str, Any]]) -> None:
-    EMP_PATH.write_text(json.dumps(employees, ensure_ascii=False, indent=2), encoding="utf-8")
+    """
+    ✅ FIX: Always write schema wrapper so ui_data import/reload stays stable.
+    """
+    if not isinstance(employees, list):
+        employees = []
+    payload = {"schema_version": 1, "employees": employees}
+    EMP_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def load_lists() -> Dict[str, List[str]]:
@@ -470,7 +477,7 @@ def capacity_summary(
 
 
 # =========================================================
-# ✅ Burndown API compatibility (ui_burndown expects this)
+# Burndown API compatibility (ui_burndown expects this)
 # =========================================================
 def series_total_units(s: TaskSeries) -> float:
     m = getattr(s, "meta", {}) or {}
@@ -523,11 +530,6 @@ def _add_workdays(start: date, n: int) -> date:
 
 
 def compute_units_composition(tasks: List[TaskSeries]):
-    """
-    ui_burndown expects:
-      all_days, done_u, rem_u, _
-    where days are WORKDAYS and units are distributed evenly across workdays of each task.
-    """
     if not tasks:
         return [], [], [], 0.0
 
@@ -539,7 +541,6 @@ def compute_units_composition(tasks: List[TaskSeries]):
 
     total_scope = float(sum(series_total_units(s) for s in tasks))
 
-    # per-task per-workday allocation
     per_day_units: Dict[str, float] = {}
     for s in tasks:
         wd = _workdays_between_inclusive(s.start, s.end)
@@ -565,14 +566,9 @@ def compute_units_composition(tasks: List[TaskSeries]):
 
 
 def forecast_eta_units(all_days, done_u, rem_u, today: date, window_workdays: int = 10):
-    """
-    ui_burndown expects:
-      anchor, vel, eta, dq
-    """
     if not all_days or not rem_u:
         return today, 0.0, None, 0
 
-    # index of last day <= today
     idx = 0
     for i, d in enumerate(all_days):
         if d <= today:
@@ -582,7 +578,6 @@ def forecast_eta_units(all_days, done_u, rem_u, today: date, window_workdays: in
 
     rem_today = float(rem_u[idx]) if idx < len(rem_u) else 0.0
 
-    # window days (workdays) up to today
     w_end = idx
     w_start = max(0, w_end - int(window_workdays) + 1)
     win_days = all_days[w_start : w_end + 1]
@@ -591,26 +586,23 @@ def forecast_eta_units(all_days, done_u, rem_u, today: date, window_workdays: in
     if not win_days:
         return today, 0.0, None, 0
 
-    # velocity: average done units per workday in window
     vel = float(sum(float(x) for x in win_done)) / float(len(win_days)) if len(win_days) > 0 else 0.0
     dq = sum(1 for x in win_done if float(x) > 0.0)
 
     if vel <= 0.0:
         return today, 0.0, None, dq
 
-    # ETA in workdays
-    eta_days = int((rem_today / vel) + 0.999999)  # ceil
+    eta_days = int((rem_today / vel) + 0.999999)
     eta = _add_workdays(today, eta_days)
     return today, vel, eta, dq
 
 
-# ✅ REQUIRED by ui_kanban.py
+# REQUIRED by ui_kanban.py
 def request_done_single(series_id: str, day: date, reason: str = "") -> None:
     st.session_state.done_requests = st.session_state.get("done_requests", [])
     st.session_state.done_requests.append({"series_id": series_id, "day_iso": day.isoformat(), "reason": reason or ""})
 
 
-# ✅ REQUIRED by ui_kanban.py
 def request_done_grid(items: List[Dict[str, str]], reason: str = "") -> None:
     st.session_state.done_requests = st.session_state.get("done_requests", [])
     for it in items:
@@ -798,7 +790,7 @@ ctx = {
     "pick_from_list": pick_from_list,
     "pick_owner": pick_owner,
 
-    # ✅ Kanban contract
+    # Kanban contract
     "request_done_single": request_done_single,
     "request_done_grid": request_done_grid,
 
@@ -806,7 +798,7 @@ ctx = {
     "lists": st.session_state.lists,
     "capacity_summary": capacity_summary,
 
-    # ✅ Burndown contract (exactly what ui_burndown expects)
+    # Burndown contract
     "compute_units_composition": compute_units_composition,
     "forecast_eta_units": forecast_eta_units,
     "series_total_units": series_total_units,
