@@ -392,6 +392,15 @@ def _plot_gantt(
 
     # deps arrows
     if show_deps:
+        # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+        # CHANGE (ONLY THIS PART):
+        # 1) Use plotted window (plot_from/plot_to) for filtering, not UI window
+        # 2) Draw arrows with guaranteed horizontal length (avoid x0==x1 collapse)
+        # 3) Ensure visibility (zorder, clip_on)
+        # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+        plot_min = mdates.date2num(plot_from)
+        plot_max = mdates.date2num(plot_to + timedelta(days=1))
+
         for it in filtered:
             sid = str(it.get("id") or "").strip()
             s = series_by_id.get(sid)
@@ -416,22 +425,22 @@ def _plot_gantt(
                 if not pred_end:
                     continue
 
-                # draw from pred_end to succ_start
-                # NOTE: Bars are drawn inclusive (end + 1 day). If succ starts right after pred ends,
-                # pred_end+1 == succ_start -> x0==x1 (nearly invisible arrow).
-                # So we draw slightly INSIDE the bars and enforce a minimum horizontal distance.
-                pred_bar_right = mdates.date2num(pred_end) + 1.0   # right edge of pred bar (inclusive)
-                succ_bar_left = mdates.date2num(succ_start)        # left edge of succ bar
+                # Bars are drawn inclusive: pred ends at pred_end + 1 day (right edge).
+                # If succ starts the next day, old logic made x0==x1 => invisible arrow.
+                pred_bar_right = mdates.date2num(pred_end) + 1.0
+                succ_bar_left = mdates.date2num(succ_start)
 
-                x0 = pred_bar_right - 0.10  # 0.10 day inside pred bar
-                x1 = succ_bar_left + 0.10   # 0.10 day inside succ bar
+                # draw slightly inside each bar and enforce min horizontal distance
+                x0 = pred_bar_right - 0.10
+                x1 = succ_bar_left + 0.10
                 if x1 <= x0:
                     x1 = x0 + 0.20
+
                 y0 = ymap[pid]
                 y1 = succ_y
 
-                # only if in window-ish
-                if max(x0, x1) < mdates.date2num(win_from) or min(x0, x1) > mdates.date2num(win_to + timedelta(days=1)):
+                # filter against actually plotted x-range
+                if max(x0, x1) < plot_min or min(x0, x1) > plot_max:
                     continue
 
                 ax.annotate(
@@ -439,6 +448,8 @@ def _plot_gantt(
                     xy=(x1, y1),
                     xytext=(x0, y0),
                     arrowprops=dict(arrowstyle="->", linewidth=0.8),
+                    zorder=10,
+                    clip_on=False,
                 )
 
     # axes formatting
