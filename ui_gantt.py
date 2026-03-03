@@ -46,7 +46,6 @@ def _series_label(s: TaskSeries) -> str:
 
 
 def _get_series_list(ctx: dict) -> List[TaskSeries]:
-    # Prefer ctx.visible_series() (respects focus mode), else session_state.series
     vs = ctx.get("visible_series")
     if callable(vs):
         try:
@@ -64,7 +63,6 @@ def _get_today(ctx: dict) -> date:
 
 
 def _get_preds(s: TaskSeries) -> List[str]:
-    # Unified read of predecessor IDs (supports both s.predecessors and s.meta["predecessors"])
     preds: List[str] = []
     try:
         v = getattr(s, "predecessors", None)
@@ -83,7 +81,6 @@ def _get_preds(s: TaskSeries) -> List[str]:
         except Exception:
             pass
 
-    # de-dup, keep order
     out: List[str] = []
     seen = set()
     for p in preds:
@@ -96,13 +93,11 @@ def _get_preds(s: TaskSeries) -> List[str]:
 
 def _set_preds(s: TaskSeries, pred_ids: List[str]) -> None:
     pred_ids = [str(x).strip() for x in (pred_ids or []) if str(x).strip()]
-    # write to s.predecessors if it exists
     if hasattr(s, "predecessors"):
         try:
             setattr(s, "predecessors", list(pred_ids))
         except Exception:
             pass
-    # always mirror into meta["predecessors"] for robustness / export
     try:
         m = getattr(s, "meta", {}) or {}
         if not isinstance(m, dict):
@@ -131,7 +126,6 @@ def _is_completed(s: TaskSeries, ctx: dict, today: date) -> bool:
             return bool(fn(s, today))
         except Exception:
             pass
-    # fallback: 100% progress if available
     fnp = ctx.get("progress_percent")
     if callable(fnp):
         try:
@@ -200,15 +194,12 @@ def _render_dependency_editor(ctx: dict, series_filtered: List[TaskSeries]) -> N
     pred_ids = [str(getattr(p, "series_id", "") or "").strip() for p in picked]
     pred_ids = [p for p in pred_ids if p and p != succ_id]
 
-    # validation: no cycles
     for pid in pred_ids:
         try:
-            # NOTE: core.py signature differs across versions; this is best-effort.
             if would_create_cycle(series_filtered, src_id=pid, tgt_id=succ_id):
                 st.error("Ungültig: Diese Abhängigkeit würde einen Zyklus erzeugen.")
                 return
         except Exception:
-            # if core changes, fail safe: allow save but warn
             st.warning("Zyklus-Check nicht verfügbar/fehlgeschlagen – bitte vorsichtig.")
             break
 
@@ -251,7 +242,6 @@ def _plot_gantt(
     show_deps: bool,
     show_critical: bool,
 ) -> None:
-    # sort for stable layout
     def sort_key(it: Dict[str, Any]) -> Tuple[str, str, str]:
         s = series_by_id.get(str(it.get("id") or "").strip())
         project = (getattr(s, "project", "") or "").strip() if s else (str(it.get("project") or "").strip())
@@ -261,7 +251,6 @@ def _plot_gantt(
 
     items_sorted = sorted(items, key=sort_key)
 
-    # filter by window overlap
     filtered: List[Dict[str, Any]] = []
     for it in items_sorted:
         stt = _safe_date(it.get("start"))
@@ -272,7 +261,6 @@ def _plot_gantt(
             continue
         filtered.append(it)
 
-    # If dependencies are shown, ensure predecessors are included so arrows can be drawn.
     plot_from = win_from
     plot_to = win_to
     if show_deps and filtered:
@@ -345,7 +333,7 @@ def _plot_gantt(
 
         y = ymap[sid]
         left = mdates.date2num(stt)
-        right = mdates.date2num(en + timedelta(days=1))  # inclusive end
+        right = mdates.date2num(en + timedelta(days=1))
         width = max(0.5, right - left)
 
         is_meta = bool(getattr(s, "is_meta", False)) if s else bool(it.get("is_meta", False))
@@ -380,16 +368,7 @@ def _plot_gantt(
 
     ax.axvline(mdates.date2num(today), linestyle="--", linewidth=1.0)
 
-    # deps arrows
     if show_deps:
-        # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-        # CHANGE (ONLY THIS PART):
-        # - read succ_start/pred_end from the plotted items (filtered), not from series_by_id,
-        #   so arrows work even when predecessors are filtered out of series_by_id.
-        # - use plot_from/plot_to for range filtering
-        # - enforce minimum horizontal arrow length so it cannot collapse
-        # - draw on top (zorder) and disable clipping
-        # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
         plot_min = mdates.date2num(plot_from)
         plot_max = mdates.date2num(plot_to + timedelta(days=1))
 
@@ -515,8 +494,8 @@ def render(ctx: dict) -> None:
                 }
             )
 
-    series_by_id = {str(getattr(s, "series_id", "") or "").strip(): s for s in cleaned}
-    series_by_id = {k: v for k, v in series_by_id.items() if k}
+    series_by_id_all = {str(getattr(s, "series_id", "") or "").strip(): s for s in cleaned}
+    series_by_id_all = {k: v for k, v in series_by_id_all.items() if k}
 
     with st.expander("Filters & Zeitraum", expanded=True):
         portfolios = sorted({(getattr(s, "portfolio", "") or "").strip() for s in cleaned if (getattr(s, "portfolio", "") or "").strip()})
@@ -574,27 +553,63 @@ def render(ctx: dict) -> None:
     allowed = set(str(getattr(s, "series_id", "") or "").strip() for s in series_filtered)
     items_filtered = [it for it in items if str(it.get("id") or it.get("series_id") or "").strip() in allowed]
 
-    norm_items: List[Dict[str, Any]] = []
-    for it in items_filtered:
+    def _norm_item(it: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         sid = str(it.get("id") or it.get("series_id") or "").strip()
         stt = _safe_date(it.get("start"))
         en = _safe_date(it.get("end"))
         if not sid or not stt or not en:
-            continue
-        norm_items.append(
-            {
-                "id": sid,
-                "title": it.get("title") or it.get("series_title") or "",
-                "start": stt,
-                "end": en,
-                "project": it.get("project") or "",
-                "owner": it.get("owner") or "",
-                "theme": it.get("theme") or "",
-                "is_meta": bool(it.get("is_meta", False)),
-                "kind": it.get("kind") or it.get("series_kind") or "task",
-                "progress": float(it.get("progress", 0.0) or 0.0),
-            }
-        )
+            return None
+        return {
+            "id": sid,
+            "title": it.get("title") or it.get("series_title") or "",
+            "start": stt,
+            "end": en,
+            "project": it.get("project") or "",
+            "owner": it.get("owner") or "",
+            "theme": it.get("theme") or "",
+            "is_meta": bool(it.get("is_meta", False)),
+            "kind": it.get("kind") or it.get("series_kind") or "task",
+            "progress": float(it.get("progress", 0.0) or 0.0),
+        }
+
+    norm_items: List[Dict[str, Any]] = []
+    for it in items_filtered:
+        ni = _norm_item(it)
+        if ni:
+            norm_items.append(ni)
+
+    # =========================
+    # CHANGE (ONLY THIS PART):
+    # When dependencies are shown, add predecessor items from the FULL item list
+    # so Gantt can actually plot and connect them with arrows.
+    # =========================
+    if show_deps:
+        all_items_by_id: Dict[str, Dict[str, Any]] = {}
+        for it in items:
+            ni = _norm_item(it)
+            if not ni:
+                continue
+            sid = str(ni.get("id") or "").strip()
+            if sid and sid not in all_items_by_id:
+                all_items_by_id[sid] = ni
+
+        present_ids = {str(it.get("id") or "").strip() for it in norm_items if str(it.get("id") or "").strip()}
+
+        for succ in series_filtered:
+            succ_id = str(getattr(succ, "series_id", "") or "").strip()
+            if not succ_id:
+                continue
+            for pid in _get_preds(succ):
+                pid = str(pid).strip()
+                if not pid or pid in present_ids:
+                    continue
+                pred_item = all_items_by_id.get(pid)
+                if pred_item:
+                    norm_items.append(pred_item)
+                    present_ids.add(pid)
+    # =========================
+    # END CHANGE
+    # =========================
 
     if win_from > win_to:
         st.error("Zeitraum ungültig: From > To.")
@@ -616,17 +631,28 @@ def render(ctx: dict) -> None:
         show_critical=show_crit,
     )
 
-    with st.expander('Open details (klick auf Titel)', expanded=False):
+    with st.expander("Open details (klick auf Titel)", expanded=False):
         if callable(open_detail):
-            q = st.text_input('Filter', placeholder='search title…', key='gantt_open_filter')
+            q = st.text_input("Filter", placeholder="search title…", key="gantt_open_filter")
             shown = list(series_filtered)
             if q:
                 qq = q.lower()
-                shown = [s for s in shown if qq in ((getattr(s,'title','') or '') + ' ' + (getattr(s,'project','') or '') + ' ' + (getattr(s,'owner','') or '')).lower()]
+                shown = [
+                    s
+                    for s in shown
+                    if qq
+                    in (
+                        (getattr(s, "title", "") or "")
+                        + " "
+                        + (getattr(s, "project", "") or "")
+                        + " "
+                        + (getattr(s, "owner", "") or "")
+                    ).lower()
+                ]
             for s in shown[:50]:
-                sid = str(getattr(s,'series_id','') or '').strip()
+                sid = str(getattr(s, "series_id", "") or "").strip()
                 if not sid:
                     continue
-                if st.button(str(getattr(s,'title','') or ''), key=f'gantt_open_{sid}', use_container_width=True):
+                if st.button(str(getattr(s, "title", "") or ""), key=f"gantt_open_{sid}", use_container_width=True):
                     open_detail(sid)
                 st.caption(f"{getattr(s,'project','')} · {getattr(s,'owner','')} · {getattr(s,'start','')}→{getattr(s,'end','')}")
