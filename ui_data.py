@@ -130,6 +130,91 @@ def _parse_series_payload(raw: Any) -> Tuple[bool, List[Dict[str, Any]]]:
     return False, []
 
 
+
+def _maybe_parse_dict_string(s: Any) -> Dict[str, Any] | None:
+    """
+    Best-effort parse for strings that look like dicts (JSON or python literal).
+    Used to recover broken employee exports where display_name contains the whole dict.
+    """
+    if not isinstance(s, str):
+        return None
+    s = s.strip()
+    if not (s.startswith("{") and s.endswith("}")):
+        return None
+    # Try JSON first (double quotes)
+    try:
+        d = json.loads(s)
+        if isinstance(d, dict):
+            return d
+    except Exception:
+        pass
+    # Try python literal (single quotes)
+    try:
+        import ast
+        d = ast.literal_eval(s)
+        if isinstance(d, dict):
+            return d
+    except Exception:
+        pass
+    return None
+
+
+def _normalize_employee_dict(item: Dict[str, Any]) -> Dict[str, Any] | None:
+    """
+    Normalize one employee item into:
+      {"id": str, "display_name": str, "aliases": list[str]}
+    Also recovers cases where display_name is a dict-repr string and/or id is a slugified garbage value.
+    """
+    if not isinstance(item, dict):
+        return None
+
+    # Recover if display_name is actually the full dict encoded as string
+    dn_raw = item.get("display_name", "")
+    recovered = _maybe_parse_dict_string(dn_raw)
+    if isinstance(recovered, dict) and recovered.get("display_name"):
+        item = recovered
+
+    display_name = str(item.get("display_name", "") or "").strip()
+    if not display_name:
+        return None
+
+    eid = str(item.get("id", "") or "").strip()
+    # If id looks like a garbage slug from the broken export, prefer a slug of the real name
+    if (not eid) or eid.lower() == "none" or eid.startswith("id_"):
+        eid = _slugify(display_name)
+
+    aliases_raw = item.get("aliases", [])
+    aliases: List[str] = []
+    if isinstance(aliases_raw, list):
+        for a in aliases_raw:
+            # Recover if an alias entry itself is the dict string
+            rec_a = _maybe_parse_dict_string(a)
+            if isinstance(rec_a, dict) and rec_a.get("display_name"):
+                a = rec_a.get("display_name")
+            a = str(a or "").strip()
+            if a:
+                aliases.append(a)
+
+    # Ensure display name is first alias
+    if display_name not in aliases:
+        aliases = [display_name] + aliases
+
+    # Also keep the numeric original id if present inside aliases, but avoid "None"
+    aliases = [x for x in aliases if str(x).strip().lower() != "none"]
+
+    # De-dup aliases case-insensitively while preserving order
+    seen = set()
+    out_aliases: List[str] = []
+    for a in aliases:
+        k = a.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        out_aliases.append(a)
+
+    return {"id": eid, "display_name": display_name, "aliases": out_aliases}
+
+
 def _parse_employees_payload(raw: Any) -> Dict[str, Any]:
     """
     Accept:
@@ -139,14 +224,31 @@ def _parse_employees_payload(raw: Any) -> Dict[str, Any]:
     Output (canonical):
       {"schema_version":1,"employees":[{"id":..,"display_name":..,"aliases":[..]}]}
     """
+
     # canonical dict
     if isinstance(raw, dict) and isinstance(raw.get("employees"), list):
         emps = raw.get("employees", [])
         if not emps:
             return {"schema_version": 1, "employees": []}
+
+        # list[dict] (may be dirty/broken) -> normalize each entry
         if isinstance(emps[0], dict):
-            # keep as-is (app.save_employees will clean on next sync if used)
-            return {"schema_version": int(raw.get("schema_version", 1) or 1), "employees": emps}
+            out: List[Dict[str, Any]] = []
+            seen_ids: set[str] = set()
+            for it in emps:
+                n = _normalize_employee_dict(it)
+                if not n:
+                    continue
+                eid = str(n.get("id") or "").strip()
+                if not eid:
+                    continue
+                if eid in seen_ids:
+                    continue
+                seen_ids.add(eid)
+                out.append(n)
+            return {"schema_version": int(raw.get("schema_version", 1) or 1), "employees": out}
+
+        # list[str]
         if isinstance(emps[0], str):
             names = _norm_str_list(emps)
             out = [{"id": _slugify(n), "display_name": n, "aliases": [n]} for n in names]
@@ -166,8 +268,22 @@ def _parse_employees_payload(raw: Any) -> Dict[str, Any]:
             out = [{"id": _slugify(n), "display_name": n, "aliases": [n]} for n in names]
             return {"schema_version": 1, "employees": out}
 
-    return {"schema_version": 1, "employees": []}
+        # dict with employees list[dict] but empty/unknown first type
+        if isinstance(emps, list) and emps and isinstance(emps[0], dict):
+            out: List[Dict[str, Any]] = []
+            seen_ids: set[str] = set()
+            for it in emps:
+                n = _normalize_employee_dict(it)
+                if not n:
+                    continue
+                eid = str(n.get("id") or "").strip()
+                if not eid or eid in seen_ids:
+                    continue
+                seen_ids.add(eid)
+                out.append(n)
+            return {"schema_version": int(raw.get("schema_version", 1) or 1), "employees": out}
 
+    return {"schema_version": 1, "employees": []}
 
 def _parse_lists_payload(raw: Any) -> Dict[str, List[str]]:
     """
