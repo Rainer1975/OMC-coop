@@ -13,6 +13,8 @@ from typing import Any, Dict, List, Tuple
 import streamlit as st
 
 
+__version__ = "2026.03.03.3"
+
 # -------------------------
 # Minimal atomic JSON writer (no dependency on app.py)
 # -------------------------
@@ -412,7 +414,7 @@ def _global_reset_everything(ctx: dict) -> None:
       - lists.json -> default minimal lists
     Then reloads session.
     """
-    _atomic_write_json(Path(ctx["DATA_FILE"]), [])
+    _atomic_write_json(Path(ctx["DATA_FILE"]), {"schema_version": 2, "app_version": str(ctx.get('APP_VERSION') or ''), "saved_at": '', "series": []})
     _atomic_write_json(Path(ctx["EMP_FILE"]), {"schema_version": 1, "employees": []})
     _atomic_write_json(Path(ctx["LISTS_FILE"]), {"portfolios": ["Default"], "projects": [], "themes": ["General"]})
     _reload_session_from_files(ctx)
@@ -589,7 +591,7 @@ def render(ctx: dict) -> None:
                 lists_payload = _parse_lists_payload(lists_raw)
 
                 # write canonical
-                _atomic_write_json(DATA_FILE, series_list)     # list[dict]
+                _atomic_write_json(DATA_FILE, {"schema_version": 2, "app_version": str(ctx.get("APP_VERSION") or ""), "saved_at": datetime.now().isoformat(timespec="seconds"), "series": series_list})  # v2 wrapper
                 _atomic_write_json(EMP_FILE, emp_payload)      # dict schema
                 _atomic_write_json(LISTS_FILE, lists_payload)  # dict
 

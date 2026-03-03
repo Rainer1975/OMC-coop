@@ -623,6 +623,7 @@ ctx = {
     "forecast_eta_units": forecast_eta_units,
 
     # required by ui_data.py
+    "APP_VERSION": __version__,
     "DATA_FILE": str(STATE_PATH),
     "EMP_FILE": str(EMP_PATH),
     "LISTS_FILE": str(LISTS_PATH),

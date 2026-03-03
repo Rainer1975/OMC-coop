@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -10,7 +13,7 @@ from typing import Any, Dict, List, Optional, Set, Union
 # =========================
 # Versioning
 # =========================
-__version__ = "2026.03.03.2"
+__version__ = "2026.03.03.3"
 STATE_SCHEMA_VERSION = 2
 
 
@@ -38,6 +41,54 @@ def _parse_date(x: Any) -> Optional[date]:
             return None
     return None
 
+
+# =========================
+# Atomic file write (Streamlit-safe)
+# =========================
+def _acquire_lock(lock_path: Path, timeout_s: float = 5.0, poll_s: float = 0.05) -> int:
+    start = time.monotonic()
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+            try:
+                os.write(fd, str(os.getpid()).encode("utf-8", errors="ignore"))
+            except Exception:
+                pass
+            return fd
+        except FileExistsError:
+            if (time.monotonic() - start) >= timeout_s:
+                raise TimeoutError(f"Could not acquire lock: {lock_path}")
+            time.sleep(poll_s)
+
+def _release_lock(fd: int, lock_path: Path) -> None:
+    try:
+        try:
+            os.close(fd)
+        finally:
+            if lock_path.exists():
+                lock_path.unlink()
+    except Exception:
+        pass
+
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    fd = _acquire_lock(lock_path)
+    try:
+        fd2, tmp_path = tempfile.mkstemp(prefix="omg_", suffix=".tmp", dir=str(path.parent))
+        try:
+            with os.fdopen(fd2, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, str(path))
+        finally:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+    finally:
+        _release_lock(fd, lock_path)
 
 # =========================
 # Data model
@@ -491,6 +542,54 @@ def gantt_items(series_list: List[TaskSeries], today: date) -> List[Dict[str, An
 # =========================
 # Persistence (v2 + backward compatible)
 # =========================
+def _normalize_series_dependencies(series_list: List["TaskSeries"]) -> None:
+    """
+    Ensure predecessors are consistently stored in BOTH locations:
+      - series.predecessors
+      - series.meta["predecessors"]
+    """
+    for s in series_list or []:
+        attr_preds: List[str] = []
+        try:
+            v = getattr(s, "predecessors", None)
+            if isinstance(v, list):
+                attr_preds = [str(x).strip() for x in v if str(x).strip()]
+        except Exception:
+            attr_preds = []
+
+        meta_preds: List[str] = []
+        try:
+            m = getattr(s, "meta", {}) or {}
+            if isinstance(m, dict):
+                v2 = m.get("predecessors", [])
+                if isinstance(v2, list):
+                    meta_preds = [str(x).strip() for x in v2 if str(x).strip()]
+        except Exception:
+            meta_preds = []
+
+        merged: List[str] = []
+        seen = set()
+        for p in attr_preds + meta_preds:
+            if p and p not in seen:
+                seen.add(p)
+                merged.append(p)
+
+        try:
+            setattr(s, "predecessors", list(merged))
+        except Exception:
+            pass
+
+        try:
+            m = getattr(s, "meta", {}) or {}
+            if not isinstance(m, dict):
+                m = {}
+            m = dict(m)
+            m["predecessors"] = list(merged)
+            setattr(s, "meta", m)
+        except Exception:
+            pass
+
+
 def save_state(
     path: Union[str, Path],
     series_list: List[TaskSeries],
@@ -506,17 +605,19 @@ def save_state(
     - load_state can still read old v1 list-only format.
     """
     p = Path(path)
+    _normalize_series_dependencies(series_list)
     payload = {
         "schema_version": int(STATE_SCHEMA_VERSION),
         "app_version": str(app_version or __version__),
         "saved_at": datetime.now().isoformat(timespec="seconds"),
         "series": [s.to_dict() for s in (series_list or [])],
     }
-    p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_json(p, payload)
 
 
 def load_state(path: Union[str, Path]) -> List[TaskSeries]:
     p = Path(path)
+    _normalize_series_dependencies(series_list)
     if not p.exists():
         return []
     try:
@@ -539,6 +640,7 @@ def load_state(path: Union[str, Path]) -> List[TaskSeries]:
                     out.append(TaskSeries.from_dict(x))
                 except Exception:
                     continue
+        _normalize_series_dependencies(out)
         return out
     except Exception:
         return []
