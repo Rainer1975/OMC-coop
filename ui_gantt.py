@@ -203,6 +203,7 @@ def _render_dependency_editor(ctx: dict, series_filtered: List[TaskSeries]) -> N
     # validation: no cycles
     for pid in pred_ids:
         try:
+            # NOTE: core.py signature differs across versions; this is best-effort.
             if would_create_cycle(series_filtered, src_id=pid, tgt_id=succ_id):
                 st.error("Ungültig: Diese Abhängigkeit würde einen Zyklus erzeugen.")
                 return
@@ -391,6 +392,12 @@ def _plot_gantt(
 
     # deps arrows
     if show_deps:
+        # IMPORTANT: use the actually plotted window (plot_from/plot_to),
+        # not the UI-selected window (win_from/win_to), because we may have
+        # auto-included predecessors outside the selected window.
+        plot_min = mdates.date2num(plot_from)
+        plot_max = mdates.date2num(plot_to + timedelta(days=1))
+
         for it in filtered:
             sid = str(it.get("id") or "").strip()
             s = series_by_id.get(sid)
@@ -421,8 +428,8 @@ def _plot_gantt(
                 y0 = ymap[pid]
                 y1 = succ_y
 
-                # only if in window-ish
-                if max(x0, x1) < mdates.date2num(win_from) or min(x0, x1) > mdates.date2num(win_to + timedelta(days=1)):
+                # keep only arrows that intersect the plotted x-range
+                if max(x0, x1) < plot_min or min(x0, x1) > plot_max:
                     continue
 
                 ax.annotate(
@@ -611,7 +618,6 @@ def render(ctx: dict) -> None:
         show_deps=show_deps,
         show_critical=show_crit,
     )
-
 
     with st.expander('Open details (klick auf Titel)', expanded=False):
         if callable(open_detail):
