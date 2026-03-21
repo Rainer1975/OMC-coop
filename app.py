@@ -50,6 +50,7 @@ from ui_employees import render as render_employees
 from ui_gantt import render as render_gantt
 from ui_home import render as render_home
 from ui_kanban import render as render_kanban
+from ui_agent_intake import render as render_agent_intake
 
 
 __version__ = "2026.03.03.5"
@@ -59,6 +60,8 @@ APP_TITLE = "OMG Coop"
 STATE_PATH = Path("data.json")
 EMP_PATH = Path("employees.json")
 LISTS_PATH = Path("lists.json")
+AGENT_DB_PATH = Path("agent_intake.db")
+ROLES_PATH = Path("access_roles.json")
 
 ADD_NEW = "➕ Add new..."
 
@@ -618,7 +621,7 @@ with st.sidebar.expander("Hilfe", expanded=False):
 
 NAV_SECTIONS = [
     ("Start", [("Home", "HOME")]),
-    ("Work", [("Kanban", "KANBAN"), ("Gantt", "GANTT"), ("Burndown", "BURNDOWN"), ("Dashboard", "DASHBOARD")]),
+    ("Work", [("Kanban", "KANBAN"), ("Gantt", "GANTT"), ("Burndown", "BURNDOWN"), ("Dashboard", "DASHBOARD"), ("Agent Intake", "AGENT_INTAKE")]),
     ("People", [("Employees", "EMPLOYEES")]),
     ("Admin", [("Data", "DATA"), ("Admin", "ADMIN")]),
 ]
@@ -713,6 +716,8 @@ ctx = {
     "DATA_FILE": str(STATE_PATH),
     "EMP_FILE": str(EMP_PATH),
     "LISTS_FILE": str(LISTS_PATH),
+    "AGENT_DB_FILE": str(AGENT_DB_PATH),
+    "ROLES_FILE": str(ROLES_PATH),
 
 
     # ---- additional ctx contract keys (required by other UI modules)
@@ -743,6 +748,8 @@ elif page == "BURNDOWN":
     render_burndown(ctx)
 elif page == "DASHBOARD":
     render_dashboard(ctx)
+elif page == "AGENT_INTAKE":
+    render_agent_intake(ctx)
 elif page == "EMPLOYEES":
     render_employees(ctx)
 elif page == "DATA":
