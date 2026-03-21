@@ -1,26 +1,3 @@
 {
-  "users": [
-    {
-      "username": "alina.punt",
-      "display_name": "Alina Punt",
-      "role": "employee",
-      "project_scope": [
-        "Chatcheck"
-      ]
-    },
-    {
-      "username": "projektleitung.chatcheck",
-      "display_name": "Projektleitung Chatcheck",
-      "role": "project_lead",
-      "project_scope": [
-        "Chatcheck"
-      ]
-    },
-    {
-      "username": "admin",
-      "display_name": "Admin",
-      "role": "admin",
-      "project_scope": []
-    }
-  ]
+  "users": []
 }
