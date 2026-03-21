@@ -30,3 +30,30 @@ streamlit run app.py
 ## Hinweise (ehrlich)
 - Ohne Persistenz (Volume) sind Daten nach Restart weg. Das ist bei vielen Free-Hosts normal.
 - Für echte Persistenz: Volume mounten oder auf DB (SQLite/Postgres) umbauen.
+
+
+## OpenAI-Sprachtranskription
+
+Die Agent-Intake-Seite unterstützt echte Audioaufnahme mit `st.audio_input` und echte Speech-to-Text-Transkription über die OpenAI Audio API.
+
+Ablauf:
+1. `🎙 ChatGPT Voice` öffnen
+2. Aufnahme starten und mit erneutem Klick beenden
+3. Das Audio wird an OpenAI transkribiert
+4. Transkript prüfen/ändern
+5. In den Eingabeschlitz übernehmen
+
+Lege den API-Schlüssel in `.streamlit/secrets.toml` oder als Umgebungsvariable `OPENAI_API_KEY` ab.
+Beispiel:
+
+```toml
+OPENAI_API_KEY = "sk-proj-REPLACE_ME"
+```
+
+
+## Voice-Intake Voraussetzungen
+
+- `OPENAI_API_KEY` in `.streamlit/secrets.toml` hinterlegen
+- Streamlit ab `1.55` verwenden
+- Für echte Aufnahme im Browser Mikrofonberechtigung erlauben
+- Die Transkription läuft über OpenAI `gpt-4o-transcribe`

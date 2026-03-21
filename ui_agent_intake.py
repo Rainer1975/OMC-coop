@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import sqlite3
+import tempfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -10,7 +13,7 @@ from typing import Any, Dict, List, Optional
 import streamlit as st
 from core import new_series
 
-__version__ = "2026.03.21.8"
+__version__ = "2026.03.21.11"
 
 DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -57,6 +60,11 @@ SUMMARY_COMMANDS = {"zusammenfassung", "zeige zusammenfassung", "show summary"}
 SAVE_COMMANDS = {"speichern", "übernehmen", "save"}
 CANCEL_COMMANDS = {"abbrechen", "neu", "reset", "neu starten"}
 NONE_WORDS = {"keine", "nein", "nichts", "n/a", "-", ""}
+VOICE_PROMPT = (
+    "Das Audio enthält ein deutschsprachiges Projekt-Update für ein Projekt-Intake-Tool. "
+    "Schreibe den gesprochenen Inhalt möglichst wörtlich, aber sauber mit Satzzeichen und korrekten Produkt- "
+    "und Projektnamen."
+)
 
 
 def _norm(x: Any) -> str:
@@ -189,6 +197,19 @@ def _visible_series(ctx: Dict[str, Any]) -> List[Any]:
     return [s for s in series if _low(getattr(s, "owner_id", "")) == uname]
 
 
+def _api_key() -> str:
+    key = ""
+    try:
+        key = st.secrets.get("OPENAI_API_KEY", "")
+    except Exception:
+        key = ""
+    return key or os.getenv("OPENAI_API_KEY", "")
+
+
+def _openai_available() -> bool:
+    return bool(_api_key())
+
+
 def _init_state() -> None:
     st.session_state.setdefault("agent_messages", [])
     st.session_state.setdefault("agent_draft", {})
@@ -200,9 +221,13 @@ def _init_state() -> None:
     st.session_state.setdefault("agent_help_open", False)
     st.session_state.setdefault("agent_login_username", "")
     st.session_state.setdefault("agent_prompt", "")
+    st.session_state.setdefault("agent_prompt_inject", None)
     st.session_state.setdefault("agent_voice_open", False)
-    st.session_state.setdefault("agent_voice_stage", "idle")
-    st.session_state.setdefault("agent_voice_transcript", "")
+    st.session_state.setdefault("agent_voice_text", "")
+    st.session_state.setdefault("agent_voice_error", "")
+    st.session_state.setdefault("agent_voice_status", "idle")
+    st.session_state.setdefault("agent_audio_digest", "")
+    st.session_state.setdefault("agent_voice_take", 0)
 
 
 def _reset_dialog(keep_user: bool = True) -> None:
@@ -215,9 +240,13 @@ def _reset_dialog(keep_user: bool = True) -> None:
     st.session_state["agent_last_saved"] = None
     st.session_state["agent_waiting_field"] = None
     st.session_state["agent_prompt"] = ""
+    st.session_state["agent_prompt_inject"] = None
     st.session_state["agent_voice_open"] = False
-    st.session_state["agent_voice_stage"] = "idle"
-    st.session_state["agent_voice_transcript"] = ""
+    st.session_state["agent_voice_text"] = ""
+    st.session_state["agent_voice_error"] = ""
+    st.session_state["agent_voice_status"] = "idle"
+    st.session_state["agent_audio_digest"] = ""
+    st.session_state["agent_voice_take"] = 0
     st.session_state["agent_auth_profile"] = profile
 
 
@@ -623,49 +652,123 @@ def _handle_prompt(ctx: Dict[str, Any], prompt: str) -> None:
     _append("assistant", "Nicht erkannt. Starte mit `Coop-Eingabe ...` oder suche mit `Hey Projekt ...`.")
 
 
-def _open_voice_simulation() -> None:
-    st.session_state.agent_voice_open = True
-    st.session_state.agent_voice_stage = "listening"
-    st.session_state.agent_voice_transcript = ""
+def _transcribe_audio_bytes(audio_bytes: bytes, mime_type: str = "audio/wav") -> str:
+    from openai import OpenAI
+
+    client = OpenAI(api_key=_api_key())
+    suffix = ".wav"
+    if "webm" in mime_type:
+        suffix = ".webm"
+    elif "mpeg" in mime_type or "mp3" in mime_type:
+        suffix = ".mp3"
+    elif "mp4" in mime_type or "m4a" in mime_type:
+        suffix = ".m4a"
+
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(audio_bytes)
+            temp_path = tmp.name
+        with open(temp_path, "rb") as audio_file:
+            transcript = client.audio.transcriptions.create(
+                model="gpt-4o-transcribe",
+                file=audio_file,
+                prompt=VOICE_PROMPT,
+                language="de",
+            )
+        if hasattr(transcript, "text"):
+            return _norm(transcript.text)
+        if isinstance(transcript, dict):
+            return _norm(transcript.get("text"))
+        return _norm(getattr(transcript, "text", str(transcript)))
+    finally:
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
 
-def _render_voice_simulation() -> None:
+def _voice_reset() -> None:
+    st.session_state["agent_voice_text"] = ""
+    st.session_state["agent_voice_error"] = ""
+    st.session_state["agent_voice_status"] = "idle"
+    st.session_state["agent_audio_digest"] = ""
+
+
+def _maybe_transcribe_audio() -> None:
+    audio = st.session_state.get("agent_voice_audio")
+    if audio is None:
+        return
+    audio_bytes = audio.getvalue()
+    digest = hashlib.sha256(audio_bytes).hexdigest()
+    if digest == st.session_state.get("agent_audio_digest"):
+        return
+    if not _openai_available():
+        st.session_state["agent_voice_error"] = "OPENAI_API_KEY fehlt. Hinterlege den Schlüssel in .streamlit/secrets.toml oder als Umgebungsvariable."
+        st.session_state["agent_voice_status"] = "error"
+        return
+    try:
+        st.session_state["agent_voice_status"] = "transcribing"
+        text = _transcribe_audio_bytes(audio_bytes, getattr(audio, "type", "audio/wav") or "audio/wav")
+        st.session_state["agent_voice_text"] = text
+        st.session_state["agent_audio_digest"] = digest
+        st.session_state["agent_voice_error"] = ""
+        st.session_state["agent_voice_status"] = "ready"
+    except Exception as exc:
+        st.session_state["agent_voice_error"] = f"Transkription fehlgeschlagen: {exc}"
+        st.session_state["agent_voice_status"] = "error"
+
+
+def _render_voice_capture() -> None:
     if not st.session_state.get("agent_voice_open"):
         return
     with st.container(border=True):
-        st.markdown("### ChatGPT-Sprachmodus")
-        stage = st.session_state.get("agent_voice_stage", "idle")
-        if stage == "listening":
-            st.info("Simulation aktiv: ChatGPT hört jetzt zu. Sprich deinen Text und klicke danach auf `Aufnahme beenden`.")
-        elif stage == "transcribing":
-            st.info("Simulation aktiv: ChatGPT transkribiert die Aufnahme und stellt den erkannten Text bereit.")
+        st.markdown("### ChatGPT Voice")
+        st.caption("Drücke im Recorder auf das Mikrofon, sprich dein Update und beende die Aufnahme mit einem zweiten Klick. Danach wird das Audio direkt über OpenAI transkribiert.")
+        audio = st.audio_input(
+            "Projektupdate aufnehmen",
+            key=f"agent_voice_audio_{st.session_state.get('agent_voice_take', 0)}",
+            label_visibility="collapsed",
+            sample_rate=16000,
+        )
+        if audio is not None:
+            st.audio(audio)
+            _maybe_transcribe_audio()
+
+        status = st.session_state.get("agent_voice_status")
+        if status == "transcribing":
+            st.info("ChatGPT transkribiert die Aufnahme …")
+        elif status == "ready":
+            st.success("Transkript bereit. Du kannst es jetzt prüfen, bearbeiten und in den Dialog übernehmen.")
+        elif status == "error":
+            st.error(st.session_state.get("agent_voice_error") or "Transkription fehlgeschlagen.")
         else:
-            st.info("Prüfe das Transkript und übernimm es dann in den Eingabeschlitz.")
+            st.info("Noch keine Aufnahme vorhanden.")
 
         st.text_area(
-            "Simuliertes ChatGPT-Transkript",
-            key="agent_voice_transcript",
-            height=140,
-            placeholder="Hier erscheint der durch ChatGPT transkribierte Text. Für die Simulation kannst du ihn hier eingeben oder korrigieren.",
+            "Transkript",
+            key="agent_voice_text",
+            height=180,
+            placeholder="Hier erscheint das echte Transkript aus der OpenAI-Transkription.",
         )
 
-        c1, c2, c3, c4 = st.columns(4)
-        if c1.button("Aufnahme beenden", use_container_width=True):
-            st.session_state.agent_voice_stage = "transcribing"
-            st.rerun()
-        if c2.button("Transkript bereit", use_container_width=True):
-            st.session_state.agent_voice_stage = "ready"
-            st.rerun()
-        if c3.button("In Eingabefeld übernehmen", use_container_width=True, type="primary"):
-            tr = _norm(st.session_state.get("agent_voice_transcript"))
+        c1, c2, c3 = st.columns(3)
+        if c1.button("In Eingabefeld übernehmen", type="primary", use_container_width=True):
+            tr = _norm(st.session_state.get("agent_voice_text"))
             current = _norm(st.session_state.get("agent_prompt"))
-            st.session_state.agent_prompt = ((current + " " + tr).strip() if current and tr else tr or current)
-            st.session_state.agent_voice_open = False
-            st.session_state.agent_voice_stage = "idle"
+            st.session_state["agent_prompt_inject"] = ((current + " " + tr).strip() if current and tr else tr or current)
+            st.session_state["agent_voice_open"] = False
+            _voice_reset()
             st.rerun()
-        if c4.button("Schließen", use_container_width=True):
-            st.session_state.agent_voice_open = False
-            st.session_state.agent_voice_stage = "idle"
+        if c2.button("Neu aufnehmen", use_container_width=True):
+            _voice_reset()
+            st.session_state["agent_voice_take"] = int(st.session_state.get("agent_voice_take", 0)) + 1
+            st.session_state["agent_voice_open"] = True
+            st.rerun()
+        if c3.button("Schließen", use_container_width=True):
+            st.session_state["agent_voice_open"] = False
+            _voice_reset()
             st.rerun()
 
 
@@ -675,12 +778,11 @@ def _render_help_box() -> None:
             [
                 "Mögliche Befehle:",
                 "- Coop-Eingabe Ich arbeite an Projekt X und bereite den Review vor",
-                "- Coop-Eingabe Ich arbeite an Projekt X und bereite den Review vor",
-                "- Die Spracheingabe läuft hier als Simulation eines ChatGPT-gestützten Voice-Flows",
                 "- ZUSAMMENFASSUNG",
                 "- SPEICHERN",
                 "- Hey Projekt Chatcheck",
                 "- ABBRECHEN",
+                "- Voice: Öffne ChatGPT Voice, nimm auf, prüfe das Transkript und übernimm es in den Schlitz.",
             ]
         )
     )
@@ -726,15 +828,14 @@ def render(ctx: Dict[str, Any]) -> None:
         _render_login(ctx)
         return
 
-    profile = _current_user()
-    role_label = "Admin" if _low(profile.get("role")) == "admin" else "Mitarbeiter:in"
+    pending_prompt = st.session_state.get("agent_prompt_inject")
+    if pending_prompt is not None:
+        st.session_state["agent_prompt"] = pending_prompt
+        st.session_state["agent_prompt_inject"] = None
 
     st.markdown('<div class="coop-shell">', unsafe_allow_html=True)
     st.markdown('<div class="coop-headline"><h1>Coop Agent</h1></div>', unsafe_allow_html=True)
-    st.markdown(
-        f'<div class="coop-sub">{_norm(profile.get("display_name"))} · {role_label}<br>Starte mit Coop-Eingabe.</div>',
-        unsafe_allow_html=True,
-    )
+    st.markdown('<div class="coop-sub">Starte mit Coop-Eingabe.</div>', unsafe_allow_html=True)
 
     if st.session_state.get("agent_help_open"):
         _render_help_box()
@@ -748,9 +849,7 @@ def render(ctx: Dict[str, Any]) -> None:
 
     if st.session_state.get("agent_last_saved"):
         info = st.session_state.agent_last_saved
-        st.success(
-            f"Gespeichert · DB #{info.get('entry_id')} · Tool: {_norm(info.get('task_id')) or 'kein Aufgabenobjekt'}"
-        )
+        st.success(f"Gespeichert · DB #{info.get('entry_id')} · Tool: {_norm(info.get('task_id')) or 'kein Aufgabenobjekt'}")
 
     st.text_input(
         "Coop Prompt",
@@ -766,8 +865,10 @@ def render(ctx: Dict[str, Any]) -> None:
         if prompt:
             _handle_prompt(ctx, prompt)
         st.rerun()
-    if c2.button("🎙 ChatGPT", use_container_width=True):
-        _open_voice_simulation()
+    if c2.button("🎙 ChatGPT Voice", use_container_width=True):
+        st.session_state["agent_voice_open"] = not bool(st.session_state.get("agent_voice_open"))
+        if not st.session_state["agent_voice_open"]:
+            _voice_reset()
         st.rerun()
     if c3.button("Hilfe", use_container_width=True):
         st.session_state.agent_help_open = not bool(st.session_state.get("agent_help_open"))
@@ -777,6 +878,9 @@ def render(ctx: Dict[str, Any]) -> None:
         _reset_dialog(keep_user=False)
         st.rerun()
 
-    _render_voice_simulation()
+    _render_voice_capture()
+
+    if not _openai_available():
+        st.caption("OpenAI-Sprachtranskription ist noch nicht aktiv. Hinterlege OPENAI_API_KEY in .streamlit/secrets.toml.")
 
     st.markdown('</div>', unsafe_allow_html=True)
