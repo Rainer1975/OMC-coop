@@ -8,9 +8,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
+import streamlit.components.v1 as components
 from core import new_series
 
-__version__ = "2026.03.21.8"
+__version__ = "2026.03.21.7"
 
 DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -200,9 +201,7 @@ def _init_state() -> None:
     st.session_state.setdefault("agent_help_open", False)
     st.session_state.setdefault("agent_login_username", "")
     st.session_state.setdefault("agent_prompt", "")
-    st.session_state.setdefault("agent_voice_open", False)
-    st.session_state.setdefault("agent_voice_stage", "idle")
-    st.session_state.setdefault("agent_voice_transcript", "")
+    st.session_state.setdefault("agent_voice_mode", False)
 
 
 def _reset_dialog(keep_user: bool = True) -> None:
@@ -215,9 +214,7 @@ def _reset_dialog(keep_user: bool = True) -> None:
     st.session_state["agent_last_saved"] = None
     st.session_state["agent_waiting_field"] = None
     st.session_state["agent_prompt"] = ""
-    st.session_state["agent_voice_open"] = False
-    st.session_state["agent_voice_stage"] = "idle"
-    st.session_state["agent_voice_transcript"] = ""
+    st.session_state["agent_voice_mode"] = False
     st.session_state["agent_auth_profile"] = profile
 
 
@@ -623,60 +620,63 @@ def _handle_prompt(ctx: Dict[str, Any], prompt: str) -> None:
     _append("assistant", "Nicht erkannt. Starte mit `Coop-Eingabe ...` oder suche mit `Hey Projekt ...`.")
 
 
-def _open_voice_simulation() -> None:
-    st.session_state.agent_voice_open = True
-    st.session_state.agent_voice_stage = "listening"
-    st.session_state.agent_voice_transcript = ""
-
-
-def _render_voice_simulation() -> None:
-    if not st.session_state.get("agent_voice_open"):
-        return
-    with st.container(border=True):
-        st.markdown("### ChatGPT-Sprachmodus")
-        stage = st.session_state.get("agent_voice_stage", "idle")
-        if stage == "listening":
-            st.info("Simulation aktiv: ChatGPT hört jetzt zu. Sprich deinen Text und klicke danach auf `Aufnahme beenden`.")
-        elif stage == "transcribing":
-            st.info("Simulation aktiv: ChatGPT transkribiert die Aufnahme und stellt den erkannten Text bereit.")
-        else:
-            st.info("Prüfe das Transkript und übernimm es dann in den Eingabeschlitz.")
-
-        st.text_area(
-            "Simuliertes ChatGPT-Transkript",
-            key="agent_voice_transcript",
-            height=140,
-            placeholder="Hier erscheint der durch ChatGPT transkribierte Text. Für die Simulation kannst du ihn hier eingeben oder korrigieren.",
-        )
-
-        c1, c2, c3, c4 = st.columns(4)
-        if c1.button("Aufnahme beenden", use_container_width=True):
-            st.session_state.agent_voice_stage = "transcribing"
-            st.rerun()
-        if c2.button("Transkript bereit", use_container_width=True):
-            st.session_state.agent_voice_stage = "ready"
-            st.rerun()
-        if c3.button("In Eingabefeld übernehmen", use_container_width=True, type="primary"):
-            tr = _norm(st.session_state.get("agent_voice_transcript"))
-            current = _norm(st.session_state.get("agent_prompt"))
-            st.session_state.agent_prompt = ((current + " " + tr).strip() if current and tr else tr or current)
-            st.session_state.agent_voice_open = False
-            st.session_state.agent_voice_stage = "idle"
-            st.rerun()
-        if c4.button("Schließen", use_container_width=True):
-            st.session_state.agent_voice_open = False
-            st.session_state.agent_voice_stage = "idle"
-            st.rerun()
+def _render_voice_widget() -> None:
+    components.html(
+        """
+        <div style="font-family: system-ui; color:#6b7280; font-size:14px; padding:4px 0 0 0;">
+          Sprachmodus aktiv. Nach Klick auf das Mikrofon startet die Browser-Erkennung.
+        </div>
+        <script>
+        const rootDoc = window.parent.document;
+        function setStatus(msg) {
+          const statusNode = document.getElementById('voice-status');
+          if (statusNode) statusNode.textContent = msg;
+        }
+        function findInput() {
+          return rootDoc.querySelector('input[aria-label="Coop Prompt"]');
+        }
+        async function startVoice() {
+          const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+          if (!SR) {
+            setStatus('Spracherkennung wird in diesem Browser nicht unterstützt.');
+            return;
+          }
+          const input = findInput();
+          if (!input) {
+            setStatus('Eingabefeld nicht gefunden.');
+            return;
+          }
+          const rec = new SR();
+          rec.lang = 'de-DE';
+          rec.interimResults = false;
+          rec.maxAlternatives = 1;
+          rec.onstart = function() { setStatus('Ich höre zu …'); };
+          rec.onerror = function(e) { setStatus('Fehler: ' + (e.error || 'unbekannt')); };
+          rec.onend = function() { setStatus('Fertig. Prüfe das Feld und sende dann ab.'); };
+          rec.onresult = function(ev) {
+            const transcript = Array.from(ev.results).map(r => r[0].transcript).join(' ').trim();
+            const current = input.value || '';
+            input.focus();
+            input.value = current ? (current + ' ' + transcript) : transcript;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+          };
+          rec.start();
+        }
+        window.addEventListener('load', startVoice);
+        </script>
+        <div id="voice-status" style="font-family: system-ui; color:#6b7280; font-size:13px; padding-top:6px;"></div>
+        """,
+        height=42,
+    )
 
 
 def _render_help_box() -> None:
     st.info(
         "\n".join(
             [
-                "Mögliche Befehle:",
+                "Mögliche Sprachbefehle:",
                 "- Coop-Eingabe Ich arbeite an Projekt X und bereite den Review vor",
-                "- Coop-Eingabe Ich arbeite an Projekt X und bereite den Review vor",
-                "- Die Spracheingabe läuft hier als Simulation eines ChatGPT-gestützten Voice-Flows",
                 "- ZUSAMMENFASSUNG",
                 "- SPEICHERN",
                 "- Hey Projekt Chatcheck",
@@ -766,8 +766,8 @@ def render(ctx: Dict[str, Any]) -> None:
         if prompt:
             _handle_prompt(ctx, prompt)
         st.rerun()
-    if c2.button("🎙 ChatGPT", use_container_width=True):
-        _open_voice_simulation()
+    if c2.button("🎙 Mikrofon", use_container_width=True):
+        st.session_state.agent_voice_mode = True
         st.rerun()
     if c3.button("Hilfe", use_container_width=True):
         st.session_state.agent_help_open = not bool(st.session_state.get("agent_help_open"))
@@ -777,6 +777,10 @@ def render(ctx: Dict[str, Any]) -> None:
         _reset_dialog(keep_user=False)
         st.rerun()
 
-    _render_voice_simulation()
+    if st.session_state.get("agent_voice_mode"):
+        _render_voice_widget()
+        if st.button("Sprachmodus schließen", use_container_width=False):
+            st.session_state.agent_voice_mode = False
+            st.rerun()
 
     st.markdown('</div>', unsafe_allow_html=True)
