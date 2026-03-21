@@ -53,7 +53,7 @@ from ui_kanban import render as render_kanban
 from ui_agent_intake import render as render_agent_intake
 
 
-__version__ = "2026.03.03.5"
+__version__ = "2026.03.21.6"
 
 APP_TITLE = "OMG Coop"
 

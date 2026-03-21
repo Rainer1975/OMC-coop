@@ -1,3 +1,4 @@
 {
+  "note": "Keine Demo-User. Rolle wird aus dem Benutzernamen abgeleitet: Sebastian = admin, alle anderen = employee.",
   "users": []
 }
