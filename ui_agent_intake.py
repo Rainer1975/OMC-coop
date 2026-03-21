@@ -220,7 +220,8 @@ def _init_state() -> None:
     st.session_state.setdefault("agent_waiting_field", None)
     st.session_state.setdefault("agent_help_open", False)
     st.session_state.setdefault("agent_login_username", "")
-    st.session_state.setdefault("agent_prompt", "")
+    st.session_state.setdefault("agent_prompt_widget", "")
+    st.session_state.setdefault("agent_prompt_clear", False)
     st.session_state.setdefault("agent_prompt_inject", None)
     st.session_state.setdefault("agent_voice_open", False)
     st.session_state.setdefault("agent_voice_text", "")
@@ -239,7 +240,8 @@ def _reset_dialog(keep_user: bool = True) -> None:
     st.session_state["agent_last_search"] = None
     st.session_state["agent_last_saved"] = None
     st.session_state["agent_waiting_field"] = None
-    st.session_state["agent_prompt"] = ""
+    st.session_state["agent_prompt_widget"] = ""
+    st.session_state["agent_prompt_clear"] = False
     st.session_state["agent_prompt_inject"] = None
     st.session_state["agent_voice_open"] = False
     st.session_state["agent_voice_text"] = ""
@@ -756,7 +758,7 @@ def _render_voice_capture() -> None:
         c1, c2, c3 = st.columns(3)
         if c1.button("In Eingabefeld übernehmen", type="primary", use_container_width=True):
             tr = _norm(st.session_state.get("agent_voice_text"))
-            current = _norm(st.session_state.get("agent_prompt"))
+            current = _norm(st.session_state.get("agent_prompt_widget"))
             st.session_state["agent_prompt_inject"] = ((current + " " + tr).strip() if current and tr else tr or current)
             st.session_state["agent_voice_open"] = False
             _voice_reset()
@@ -830,8 +832,12 @@ def render(ctx: Dict[str, Any]) -> None:
 
     pending_prompt = st.session_state.get("agent_prompt_inject")
     if pending_prompt is not None:
-        st.session_state["agent_prompt"] = pending_prompt
+        st.session_state["agent_prompt_widget"] = pending_prompt
         st.session_state["agent_prompt_inject"] = None
+
+    if st.session_state.get("agent_prompt_clear"):
+        st.session_state["agent_prompt_widget"] = ""
+        st.session_state["agent_prompt_clear"] = False
 
     st.markdown('<div class="coop-shell">', unsafe_allow_html=True)
     st.markdown('<div class="coop-headline"><h1>Coop Agent</h1></div>', unsafe_allow_html=True)
@@ -853,17 +859,17 @@ def render(ctx: Dict[str, Any]) -> None:
 
     st.text_input(
         "Coop Prompt",
-        key="agent_prompt",
+        key="agent_prompt_widget",
         label_visibility="collapsed",
         placeholder="Gib deine Projektdaten ein",
     )
 
     c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1])
     if c1.button("Senden", use_container_width=True, type="primary"):
-        prompt = _norm(st.session_state.get("agent_prompt"))
-        st.session_state["agent_prompt"] = ""
+        prompt = _norm(st.session_state.get("agent_prompt_widget"))
         if prompt:
             _handle_prompt(ctx, prompt)
+        st.session_state["agent_prompt_clear"] = True
         st.rerun()
     if c2.button("🎙 ChatGPT Voice", use_container_width=True):
         st.session_state["agent_voice_open"] = not bool(st.session_state.get("agent_voice_open"))
