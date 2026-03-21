@@ -8,9 +8,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
+import streamlit.components.v1 as components
 from core import new_series
 
-__version__ = "2026.03.21.5"
+__version__ = "2026.03.21.7"
 
 DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -43,19 +44,19 @@ CREATE TABLE IF NOT EXISTS entries (
 
 FIELDS = [
     ("project", "Wie heißt das Projekt?"),
-    ("work_item", "Woran arbeitest du daran konkret?"),
+    ("work_item", "Woran arbeitest du konkret?"),
     ("status", "Wie ist der aktuelle Status?"),
     ("next_step", "Was ist der nächste konkrete Schritt?"),
     ("blockers", "Gibt es Blocker oder Abhängigkeiten? Wenn nein, sag einfach 'keine'."),
     ("entry_kind", "Soll ich das als Status, als Aufgabe oder als beides behandeln?"),
     ("priority", "Welche Priorität hat das? Niedrig, Mittel oder Hoch?"),
     ("due_hint", "Gibt es einen Termin oder zeitlichen Hinweis?"),
-    ("notes", "Gibt es noch Zusatznotizen, die ich mitnehmen soll? Wenn nicht, sag 'keine'."),
+    ("notes", "Gibt es noch Zusatznotizen? Wenn nicht, sag 'keine'."),
 ]
 
-SUMMARY_COMMANDS = {"zeige zusammenfassung", "zusammenfassung", "anzeigen", "prüfen", "check"}
+SUMMARY_COMMANDS = {"zusammenfassung", "zeige zusammenfassung", "show summary"}
 SAVE_COMMANDS = {"speichern", "übernehmen", "save"}
-CANCEL_COMMANDS = {"abbrechen", "neu starten", "reset"}
+CANCEL_COMMANDS = {"abbrechen", "neu", "reset", "neu starten"}
 NONE_WORDS = {"keine", "nein", "nichts", "n/a", "-", ""}
 
 
@@ -197,28 +198,24 @@ def _init_state() -> None:
     st.session_state.setdefault("agent_last_search", None)
     st.session_state.setdefault("agent_last_saved", None)
     st.session_state.setdefault("agent_waiting_field", None)
-    if not st.session_state["agent_messages"]:
-        st.session_state["agent_messages"] = [
-            {
-                "role": "assistant",
-                "content": "Gib deine Projektinformationen ein. Starte mit `Coop-Eingabe ...` oder suche mit `Hey Projekt ...`.",
-            }
-        ]
+    st.session_state.setdefault("agent_help_open", False)
+    st.session_state.setdefault("agent_login_username", "")
+    st.session_state.setdefault("agent_prompt", "")
+    st.session_state.setdefault("agent_voice_mode", False)
 
 
-def _reset_dialog() -> None:
-    st.session_state["agent_messages"] = [
-        {
-            "role": "assistant",
-            "content": "Gib deine Projektinformationen ein. Starte mit `Coop-Eingabe ...` oder suche mit `Hey Projekt ...`.",
-        }
-    ]
+def _reset_dialog(keep_user: bool = True) -> None:
+    profile = st.session_state.get("agent_auth_profile") if keep_user else None
+    st.session_state["agent_messages"] = []
     st.session_state["agent_draft"] = {}
     st.session_state["agent_mode"] = "idle"
     st.session_state["agent_show_summary"] = False
     st.session_state["agent_last_search"] = None
     st.session_state["agent_last_saved"] = None
     st.session_state["agent_waiting_field"] = None
+    st.session_state["agent_prompt"] = ""
+    st.session_state["agent_voice_mode"] = False
+    st.session_state["agent_auth_profile"] = profile
 
 
 def _append(role: str, content: str) -> None:
@@ -330,7 +327,7 @@ def _show_summary() -> None:
         _append("assistant", "Es gibt noch keine erfassten Daten. Starte mit `Coop-Eingabe ...`.")
         return
     st.session_state.agent_show_summary = True
-    _append("assistant", "Ich blende die Zusammenfassung ein.")
+    _append("assistant", "ZUSAMMENFASSUNG wird eingeblendet.")
 
 
 def _ensure_project_in_lists(ctx: Dict[str, Any], project: str) -> None:
@@ -455,7 +452,7 @@ def _render_summary_box() -> None:
     if not draft:
         return
     with st.container(border=True):
-        st.markdown("### Zusammenfassung")
+        st.markdown("### ZUSAMMENFASSUNG")
         rows = [
             ("Projekt", draft.get("project")),
             ("Arbeitsinhalt", draft.get("work_item")),
@@ -479,7 +476,7 @@ def _render_search_result(ctx: Dict[str, Any]) -> None:
     db_hits = payload.get("db_hits") or []
     task_hits = payload.get("task_hits") or []
     with st.container(border=True):
-        st.markdown(f"### Projektsicht: {query}")
+        st.markdown(f"### Suchergebnis: {query}")
         if not db_hits and not task_hits:
             st.info("Keine sichtbaren Informationen gefunden.")
             return
@@ -528,7 +525,7 @@ def _search_project(ctx: Dict[str, Any], query: str) -> None:
         if ql in hay:
             task_hits.append(s)
     st.session_state.agent_last_search = {"query": q, "db_hits": db_hits, "task_hits": task_hits}
-    _append("assistant", f"Ich habe nach `{q}` gesucht. Die sichtbaren Treffer blende ich unten ein.")
+    _append("assistant", f"Ich habe nach `{q}` gesucht.")
 
 
 def _start_capture(ctx: Dict[str, Any], text: str) -> None:
@@ -547,7 +544,7 @@ def _start_capture(ctx: Dict[str, Any], text: str) -> None:
         _append("assistant", _question_for(missing[0]))
     else:
         st.session_state.agent_waiting_field = None
-        _append("assistant", "Ich habe alle Felder erfasst. Sage `zeige zusammenfassung` oder direkt `speichern`.")
+        _append("assistant", "Ich habe alle Felder erfasst. Sage `ZUSAMMENFASSUNG` oder `SPEICHERN`.")
 
 
 def _continue_capture(ctx: Dict[str, Any], text: str) -> None:
@@ -567,7 +564,7 @@ def _continue_capture(ctx: Dict[str, Any], text: str) -> None:
         _append("assistant", _question_for(missing[0]))
     else:
         st.session_state.agent_waiting_field = None
-        _append("assistant", "Ich habe alles. Sage `zeige zusammenfassung` oder `speichern`.")
+        _append("assistant", "Ich habe alles. Sage `ZUSAMMENFASSUNG` oder `SPEICHERN`.")
 
 
 def _handle_prompt(ctx: Dict[str, Any], prompt: str) -> None:
@@ -594,10 +591,11 @@ def _handle_prompt(ctx: Dict[str, Any], prompt: str) -> None:
             _append("assistant", f"Zum Speichern fehlt noch etwas. {_question_for(missing[0])}")
             return
         entry_id = _store_entry(ctx, draft)
+        project = _norm(draft.get("project"))
         st.session_state.agent_mode = "idle"
         st.session_state.agent_show_summary = False
         st.session_state.agent_waiting_field = None
-        _append("assistant", f"Gespeichert. Eintrag #{entry_id} ist in der separaten Datenbank verfügbar. Mit `Hey Projekt {draft.get('project','')}` kannst du ihn wieder finden.")
+        _append("assistant", f"Gespeichert. Eintrag #{entry_id} ist verfügbar. Mit `Hey Projekt {project}` kannst du ihn wieder finden.")
         st.session_state.agent_draft = {}
         return
 
@@ -619,58 +617,127 @@ def _handle_prompt(ctx: Dict[str, Any], prompt: str) -> None:
         _continue_capture(ctx, text)
         return
 
-    _append("assistant", "Ich habe den Befehl nicht als Intake erkannt. Starte mit `Coop-Eingabe ...` oder suche mit `Hey Projekt ...`.")
+    _append("assistant", "Nicht erkannt. Starte mit `Coop-Eingabe ...` oder suche mit `Hey Projekt ...`.")
 
 
-def _render_auth(ctx: Dict[str, Any]) -> None:
-    _seed_users(ctx)
-    st.sidebar.subheader("Login")
-    users = _employees(ctx)
-    options = [u["display_name"] for u in users]
-    display_to_username = {u["display_name"]: u["username"] for u in users}
-    picked = st.sidebar.selectbox("Bekannte Nutzer", ["Manuell eingeben"] + options, key="agent_login_pick")
-    default = display_to_username.get(picked, st.session_state.get("agent_login_username", ""))
-    username = st.sidebar.text_input("Benutzername", value=default, key="agent_login_username")
-    cols = st.sidebar.columns(2)
-    if cols[0].button("Anmelden", use_container_width=True):
-        profile = _user_record(ctx, username)
-        st.session_state.agent_auth_profile = profile
-        _reset_dialog()
-        st.rerun()
-    if cols[1].button("Abmelden", use_container_width=True):
-        st.session_state.agent_auth_profile = None
-        _reset_dialog()
-        st.rerun()
-    profile = _current_user()
-    if profile:
-        label = "Admin" if _low(profile.get("role")) == "admin" else "Mitarbeiter:in"
-        st.sidebar.success(f"{_norm(profile.get('display_name'))} · {label}")
-        if not users:
-            st.sidebar.caption("Im ZIP sind keine gepflegten Nutzer hinterlegt. Für den Test wird der eingegebene Benutzername verwendet. Sebastian erhält Admin-Rechte.")
-    else:
-        st.sidebar.info("Anmeldung per Benutzername. Sebastian hat Admin-Rechte, alle anderen sind gleichberechtigt.")
+def _render_voice_widget() -> None:
+    components.html(
+        """
+        <div style="font-family: system-ui; color:#6b7280; font-size:14px; padding:4px 0 0 0;">
+          Sprachmodus aktiv. Nach Klick auf das Mikrofon startet die Browser-Erkennung.
+        </div>
+        <script>
+        const rootDoc = window.parent.document;
+        function setStatus(msg) {
+          const statusNode = document.getElementById('voice-status');
+          if (statusNode) statusNode.textContent = msg;
+        }
+        function findInput() {
+          return rootDoc.querySelector('input[aria-label="Coop Prompt"]');
+        }
+        async function startVoice() {
+          const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+          if (!SR) {
+            setStatus('Spracherkennung wird in diesem Browser nicht unterstützt.');
+            return;
+          }
+          const input = findInput();
+          if (!input) {
+            setStatus('Eingabefeld nicht gefunden.');
+            return;
+          }
+          const rec = new SR();
+          rec.lang = 'de-DE';
+          rec.interimResults = false;
+          rec.maxAlternatives = 1;
+          rec.onstart = function() { setStatus('Ich höre zu …'); };
+          rec.onerror = function(e) { setStatus('Fehler: ' + (e.error || 'unbekannt')); };
+          rec.onend = function() { setStatus('Fertig. Prüfe das Feld und sende dann ab.'); };
+          rec.onresult = function(ev) {
+            const transcript = Array.from(ev.results).map(r => r[0].transcript).join(' ').trim();
+            const current = input.value || '';
+            input.focus();
+            input.value = current ? (current + ' ' + transcript) : transcript;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+          };
+          rec.start();
+        }
+        window.addEventListener('load', startVoice);
+        </script>
+        <div id="voice-status" style="font-family: system-ui; color:#6b7280; font-size:13px; padding-top:6px;"></div>
+        """,
+        height=42,
+    )
+
+
+def _render_help_box() -> None:
+    st.info(
+        "\n".join(
+            [
+                "Mögliche Sprachbefehle:",
+                "- Coop-Eingabe Ich arbeite an Projekt X und bereite den Review vor",
+                "- ZUSAMMENFASSUNG",
+                "- SPEICHERN",
+                "- Hey Projekt Chatcheck",
+                "- ABBRECHEN",
+            ]
+        )
+    )
+
+
+def _render_login(ctx: Dict[str, Any]) -> None:
+    st.markdown('<div class="coop-center">', unsafe_allow_html=True)
+    st.markdown("<h2>Anmelden</h2>", unsafe_allow_html=True)
+    st.text_input("Benutzername", key="agent_login_username", label_visibility="collapsed", placeholder="Benutzername")
+    cols = st.columns([1, 1, 1])
+    if cols[1].button("Weiter", use_container_width=True, type="primary"):
+        profile = _user_record(ctx, st.session_state.get("agent_login_username", ""))
+        if profile:
+            st.session_state.agent_auth_profile = profile
+            _reset_dialog()
+            st.rerun()
+    st.markdown("<div class='coop-muted'>Sebastian hat Admin-Rechte. Alle anderen sind gleichberechtigt.</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def render(ctx: Dict[str, Any]) -> None:
     _init_state()
-    _render_auth(ctx)
+    _seed_users(ctx)
 
     st.markdown(
         """
         <style>
-        .agent-title {text-align:center; margin-top: 4vh; margin-bottom: 1rem;}
-        .agent-sub {text-align:center; color:#6b7280; margin-bottom: 2rem;}
-        div[data-testid="stChatMessage"] {max-width: 900px; margin-left: auto; margin-right: auto;}
+        [data-testid="stSidebar"], header[data-testid="stHeader"] {display:none !important;}
+        .block-container {padding-top: 2rem; max-width: 920px;}
+        .coop-center {max-width: 760px; margin: 12vh auto 0 auto; text-align:center;}
+        .coop-muted {color:#6b7280; margin-top: .75rem;}
+        .coop-shell {max-width: 860px; margin: 8vh auto 0 auto;}
+        .coop-headline {text-align:center; margin-bottom: .75rem;}
+        .coop-sub {text-align:center; color:#6b7280; margin-bottom: 1.2rem;}
+        .stTextInput > div > div > input {font-size: 1.05rem; padding-top: .95rem; padding-bottom: .95rem;}
+        div[data-testid="stChatMessage"] {max-width: 860px; margin-left:auto; margin-right:auto;}
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    st.markdown('<div class="agent-title"><h1>Coop Agent</h1></div>', unsafe_allow_html=True)
+    if not _current_user():
+        _render_login(ctx)
+        return
+
+    profile = _current_user()
+    role_label = "Admin" if _low(profile.get("role")) == "admin" else "Mitarbeiter:in"
+
+    st.markdown('<div class="coop-shell">', unsafe_allow_html=True)
+    st.markdown('<div class="coop-headline"><h1>Coop Agent</h1></div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="agent-sub">Einfacher Intake in natürlicher Sprache. Start mit <code>Coop-Eingabe ...</code> oder Suche mit <code>Hey Projekt ...</code>.</div>',
+        f'<div class="coop-sub">{_norm(profile.get("display_name"))} · {role_label}<br>Starte mit Coop-Eingabe.</div>',
         unsafe_allow_html=True,
     )
+
+    if st.session_state.get("agent_help_open"):
+        _render_help_box()
 
     for msg in st.session_state.agent_messages:
         with st.chat_message(msg["role"]):
@@ -681,14 +748,39 @@ def render(ctx: Dict[str, Any]) -> None:
 
     if st.session_state.get("agent_last_saved"):
         info = st.session_state.agent_last_saved
-        with st.container(border=True):
-            st.markdown("### Letzter Schreibvorgang")
-            st.markdown(f"**Datenbank-Eintrag:** {info.get('entry_id')}")
-            st.markdown(f"**Tool-Eintrag:** {_norm(info.get('task_id')) or 'kein Aufgabenobjekt erzeugt'}")
+        st.success(
+            f"Gespeichert · DB #{info.get('entry_id')} · Tool: {_norm(info.get('task_id')) or 'kein Aufgabenobjekt'}"
+        )
 
-    disabled = not bool(_current_user())
-    placeholder = "Gib deine Projektinformationen ein …" if not disabled else "Zuerst links mit Benutzername anmelden …"
-    prompt = st.chat_input(placeholder, disabled=disabled)
-    if prompt:
-        _handle_prompt(ctx, prompt)
+    st.text_input(
+        "Coop Prompt",
+        key="agent_prompt",
+        label_visibility="collapsed",
+        placeholder="Gib deine Projektdaten ein",
+    )
+
+    c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1])
+    if c1.button("Senden", use_container_width=True, type="primary"):
+        prompt = _norm(st.session_state.get("agent_prompt"))
+        st.session_state["agent_prompt"] = ""
+        if prompt:
+            _handle_prompt(ctx, prompt)
         st.rerun()
+    if c2.button("🎙 Mikrofon", use_container_width=True):
+        st.session_state.agent_voice_mode = True
+        st.rerun()
+    if c3.button("Hilfe", use_container_width=True):
+        st.session_state.agent_help_open = not bool(st.session_state.get("agent_help_open"))
+        st.rerun()
+    if c4.button("Abmelden", use_container_width=True):
+        st.session_state.agent_auth_profile = None
+        _reset_dialog(keep_user=False)
+        st.rerun()
+
+    if st.session_state.get("agent_voice_mode"):
+        _render_voice_widget()
+        if st.button("Sprachmodus schließen", use_container_width=False):
+            st.session_state.agent_voice_mode = False
+            st.rerun()
+
+    st.markdown('</div>', unsafe_allow_html=True)
