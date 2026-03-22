@@ -220,13 +220,11 @@ def _init_state() -> None:
     st.session_state.setdefault("agent_waiting_field", None)
     st.session_state.setdefault("agent_help_open", False)
     st.session_state.setdefault("agent_login_username", "")
-    st.session_state.setdefault("agent_prompt_widget", "")
-    st.session_state.setdefault("agent_prompt_clear", False)
-    st.session_state.setdefault("agent_prompt_inject", None)
+    st.session_state.setdefault("agent_prompt_value", "")
+    st.session_state.setdefault("agent_prompt_rev", 0)
     st.session_state.setdefault("agent_voice_open", False)
-    st.session_state.setdefault("agent_voice_text_widget", "")
-    st.session_state.setdefault("agent_voice_text_inject", None)
-    st.session_state.setdefault("agent_voice_text_clear", False)
+    st.session_state.setdefault("agent_voice_text_value", "")
+    st.session_state.setdefault("agent_voice_text_rev", 0)
     st.session_state.setdefault("agent_voice_error", "")
     st.session_state.setdefault("agent_voice_status", "idle")
     st.session_state.setdefault("agent_audio_digest", "")
@@ -242,13 +240,11 @@ def _reset_dialog(keep_user: bool = True) -> None:
     st.session_state["agent_last_search"] = None
     st.session_state["agent_last_saved"] = None
     st.session_state["agent_waiting_field"] = None
-    st.session_state["agent_prompt_widget"] = ""
-    st.session_state["agent_prompt_clear"] = False
-    st.session_state["agent_prompt_inject"] = None
+    st.session_state["agent_prompt_value"] = ""
+    st.session_state["agent_prompt_rev"] = int(st.session_state.get("agent_prompt_rev", 0)) + 1
     st.session_state["agent_voice_open"] = False
-    st.session_state["agent_voice_text_widget"] = ""
-    st.session_state["agent_voice_text_inject"] = None
-    st.session_state["agent_voice_text_clear"] = False
+    st.session_state["agent_voice_text_value"] = ""
+    st.session_state["agent_voice_text_rev"] = int(st.session_state.get("agent_voice_text_rev", 0)) + 1
     st.session_state["agent_voice_error"] = ""
     st.session_state["agent_voice_status"] = "idle"
     st.session_state["agent_audio_digest"] = ""
@@ -696,9 +692,8 @@ def _transcribe_audio_bytes(audio_bytes: bytes, mime_type: str = "audio/wav") ->
 
 
 def _voice_reset() -> None:
-    st.session_state["agent_voice_text_widget"] = ""
-    st.session_state["agent_voice_text_inject"] = None
-    st.session_state["agent_voice_text_clear"] = False
+    st.session_state["agent_voice_text_value"] = ""
+    st.session_state["agent_voice_text_rev"] = int(st.session_state.get("agent_voice_text_rev", 0)) + 1
     st.session_state["agent_voice_error"] = ""
     st.session_state["agent_voice_status"] = "idle"
     st.session_state["agent_audio_digest"] = ""
@@ -719,8 +714,8 @@ def _maybe_transcribe_audio() -> None:
     try:
         st.session_state["agent_voice_status"] = "transcribing"
         text = _transcribe_audio_bytes(audio_bytes, getattr(audio, "type", "audio/wav") or "audio/wav")
-        st.session_state["agent_voice_text_inject"] = text
-        st.session_state["agent_voice_text_clear"] = False
+        st.session_state["agent_voice_text_value"] = text
+        st.session_state["agent_voice_text_rev"] = int(st.session_state.get("agent_voice_text_rev", 0)) + 1
         st.session_state["agent_audio_digest"] = digest
         st.session_state["agent_voice_error"] = ""
         st.session_state["agent_voice_status"] = "ready"
@@ -732,13 +727,6 @@ def _maybe_transcribe_audio() -> None:
 def _render_voice_capture() -> None:
     if not st.session_state.get("agent_voice_open"):
         return
-    if st.session_state.get("agent_voice_text_clear"):
-        st.session_state["agent_voice_text_widget"] = ""
-        st.session_state["agent_voice_text_clear"] = False
-    pending_voice = st.session_state.get("agent_voice_text_inject")
-    if pending_voice is not None:
-        st.session_state["agent_voice_text_widget"] = pending_voice
-        st.session_state["agent_voice_text_inject"] = None
     with st.container(border=True):
         st.markdown("### ChatGPT Voice")
         st.caption("Drücke im Recorder auf das Mikrofon, sprich dein Update und beende die Aufnahme mit einem zweiten Klick. Danach wird das Audio direkt über OpenAI transkribiert.")
@@ -762,18 +750,21 @@ def _render_voice_capture() -> None:
         else:
             st.info("Noch keine Aufnahme vorhanden.")
 
-        st.text_area(
+        voice_text = st.text_area(
             "Transkript",
-            key="agent_voice_text_widget",
+            key=f"agent_voice_text_editor_{st.session_state.get('agent_voice_text_rev', 0)}",
+            value=st.session_state.get("agent_voice_text_value", ""),
             height=180,
             placeholder="Hier erscheint das echte Transkript aus der OpenAI-Transkription.",
         )
+        st.session_state["agent_voice_text_value"] = voice_text
 
         c1, c2, c3 = st.columns(3)
         if c1.button("In Eingabefeld übernehmen", type="primary", use_container_width=True):
-            tr = _norm(st.session_state.get("agent_voice_text_widget"))
-            current = _norm(st.session_state.get("agent_prompt_widget"))
-            st.session_state["agent_prompt_inject"] = ((current + " " + tr).strip() if current and tr else tr or current)
+            tr = _norm(voice_text)
+            current = _norm(st.session_state.get("agent_prompt_value"))
+            st.session_state["agent_prompt_value"] = ((current + " " + tr).strip() if current and tr else tr or current)
+            st.session_state["agent_prompt_rev"] = int(st.session_state.get("agent_prompt_rev", 0)) + 1
             st.session_state["agent_voice_open"] = False
             _voice_reset()
             st.rerun()
@@ -844,14 +835,6 @@ def render(ctx: Dict[str, Any]) -> None:
         _render_login(ctx)
         return
 
-    pending_prompt = st.session_state.get("agent_prompt_inject")
-    if pending_prompt is not None:
-        st.session_state["agent_prompt_widget"] = pending_prompt
-        st.session_state["agent_prompt_inject"] = None
-
-    if st.session_state.get("agent_prompt_clear"):
-        st.session_state["agent_prompt_widget"] = ""
-        st.session_state["agent_prompt_clear"] = False
 
     st.markdown('<div class="coop-shell">', unsafe_allow_html=True)
     st.markdown('<div class="coop-headline"><h1>Coop Agent</h1></div>', unsafe_allow_html=True)
@@ -871,19 +854,22 @@ def render(ctx: Dict[str, Any]) -> None:
         info = st.session_state.agent_last_saved
         st.success(f"Gespeichert · DB #{info.get('entry_id')} · Tool: {_norm(info.get('task_id')) or 'kein Aufgabenobjekt'}")
 
-    st.text_input(
+    prompt_value = st.text_input(
         "Coop Prompt",
-        key="agent_prompt_widget",
+        key=f"agent_prompt_input_{st.session_state.get('agent_prompt_rev', 0)}",
+        value=st.session_state.get("agent_prompt_value", ""),
         label_visibility="collapsed",
         placeholder="Gib deine Projektdaten ein",
     )
+    st.session_state["agent_prompt_value"] = prompt_value
 
     c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1])
     if c1.button("Senden", use_container_width=True, type="primary"):
-        prompt = _norm(st.session_state.get("agent_prompt_widget"))
+        prompt = _norm(prompt_value)
         if prompt:
             _handle_prompt(ctx, prompt)
-        st.session_state["agent_prompt_clear"] = True
+        st.session_state["agent_prompt_value"] = ""
+        st.session_state["agent_prompt_rev"] = int(st.session_state.get("agent_prompt_rev", 0)) + 1
         st.rerun()
     if c2.button("🎙 ChatGPT Voice", use_container_width=True):
         st.session_state["agent_voice_open"] = not bool(st.session_state.get("agent_voice_open"))
