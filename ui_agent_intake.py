@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 import streamlit as st
 from core import new_series
 
-__version__ = "2026.03.21.11"
+__version__ = "2026.03.22.16"
 
 DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -229,6 +229,8 @@ def _init_state() -> None:
     st.session_state.setdefault("agent_voice_status", "idle")
     st.session_state.setdefault("agent_audio_digest", "")
     st.session_state.setdefault("agent_voice_take", 0)
+    st.session_state.setdefault("agent_voice_diag", {})
+    st.session_state.setdefault("agent_voice_debug", True)
 
 
 def _reset_dialog(keep_user: bool = True) -> None:
@@ -249,6 +251,7 @@ def _reset_dialog(keep_user: bool = True) -> None:
     st.session_state["agent_voice_status"] = "idle"
     st.session_state["agent_audio_digest"] = ""
     st.session_state["agent_voice_take"] = 0
+    st.session_state["agent_voice_diag"] = {}
     st.session_state["agent_auth_profile"] = profile
 
 
@@ -654,10 +657,11 @@ def _handle_prompt(ctx: Dict[str, Any], prompt: str) -> None:
     _append("assistant", "Nicht erkannt. Starte mit `Coop-Eingabe ...` oder suche mit `Hey Projekt ...`.")
 
 
-def _transcribe_audio_bytes(audio_bytes: bytes, mime_type: str = "audio/wav") -> str:
+def _transcribe_audio_bytes(audio_bytes: bytes, mime_type: str = "audio/wav") -> tuple[str, dict]:
     from openai import OpenAI
 
     client = OpenAI(api_key=_api_key())
+    model = "gpt-4o-mini-transcribe"
     suffix = ".wav"
     if "webm" in mime_type:
         suffix = ".webm"
@@ -667,22 +671,37 @@ def _transcribe_audio_bytes(audio_bytes: bytes, mime_type: str = "audio/wav") ->
         suffix = ".m4a"
 
     temp_path = None
+    diag = {
+        "model": model,
+        "mime_type": mime_type,
+        "audio_bytes": len(audio_bytes or b""),
+        "suffix": suffix,
+        "request_sent": False,
+        "response_type": "",
+        "response_preview": "",
+    }
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(audio_bytes)
             temp_path = tmp.name
         with open(temp_path, "rb") as audio_file:
+            diag["request_sent"] = True
             transcript = client.audio.transcriptions.create(
-                model="gpt-4o-transcribe",
+                model=model,
                 file=audio_file,
                 prompt=VOICE_PROMPT,
                 language="de",
             )
+        diag["response_type"] = type(transcript).__name__
+        text_value = ""
         if hasattr(transcript, "text"):
-            return _norm(transcript.text)
-        if isinstance(transcript, dict):
-            return _norm(transcript.get("text"))
-        return _norm(getattr(transcript, "text", str(transcript)))
+            text_value = _norm(transcript.text)
+        elif isinstance(transcript, dict):
+            text_value = _norm(transcript.get("text"))
+        else:
+            text_value = _norm(getattr(transcript, "text", str(transcript)))
+        diag["response_preview"] = text_value[:300]
+        return text_value, diag
     finally:
         if temp_path:
             try:
@@ -697,35 +716,68 @@ def _voice_reset(increment_take: bool = False) -> None:
     st.session_state["agent_voice_error"] = ""
     st.session_state["agent_voice_status"] = "idle"
     st.session_state["agent_audio_digest"] = ""
+    st.session_state["agent_voice_diag"] = {}
     if increment_take:
         st.session_state["agent_voice_take"] = int(st.session_state.get("agent_voice_take", 0)) + 1
 
 
 def _maybe_transcribe_audio(audio) -> None:
+    diag = {
+        "key_present": bool(_api_key()),
+        "audio_present": audio is not None,
+        "audio_name": getattr(audio, "name", ""),
+        "mime_type": getattr(audio, "type", "audio/wav") or "audio/wav",
+        "audio_bytes": 0,
+        "digest_prefix": "",
+        "request_sent": False,
+        "model": "gpt-4o-mini-transcribe",
+        "response_type": "",
+        "response_preview": "",
+        "error": "",
+        "status": "idle",
+    }
+    st.session_state["agent_voice_diag"] = diag
     if audio is None:
         return
     audio_bytes = audio.getvalue()
+    diag["audio_bytes"] = len(audio_bytes or b"")
     if not audio_bytes:
+        diag["error"] = "Audioobjekt vorhanden, aber ohne Daten."
+        diag["status"] = "error"
+        st.session_state["agent_voice_error"] = diag["error"]
+        st.session_state["agent_voice_status"] = "error"
+        st.session_state["agent_voice_diag"] = diag
         return
     digest = hashlib.sha256(audio_bytes).hexdigest()
+    diag["digest_prefix"] = digest[:12]
     if digest == st.session_state.get("agent_audio_digest"):
+        diag["status"] = "cached"
+        st.session_state["agent_voice_diag"] = diag
         return
     if not _openai_available():
-        st.session_state["agent_voice_error"] = "OPENAI_API_KEY fehlt. Hinterlege den Schlüssel in .streamlit/secrets.toml oder als Umgebungsvariable."
+        diag["error"] = "OPENAI_API_KEY fehlt oder wird nicht geladen."
+        diag["status"] = "error"
+        st.session_state["agent_voice_error"] = diag["error"]
         st.session_state["agent_voice_status"] = "error"
+        st.session_state["agent_voice_diag"] = diag
         return
     try:
         st.session_state["agent_voice_status"] = "transcribing"
-        mime_type = getattr(audio, "type", "audio/wav") or "audio/wav"
-        text = _transcribe_audio_bytes(audio_bytes, mime_type)
-        st.session_state["agent_voice_text_value"] = text
+        text_value, transcribe_diag = _transcribe_audio_bytes(audio_bytes, diag["mime_type"])
+        diag.update(transcribe_diag)
+        diag["request_sent"] = True
+        st.session_state["agent_voice_text_value"] = text_value
         st.session_state["agent_voice_text_rev"] = int(st.session_state.get("agent_voice_text_rev", 0)) + 1
         st.session_state["agent_audio_digest"] = digest
         st.session_state["agent_voice_error"] = ""
         st.session_state["agent_voice_status"] = "ready"
+        diag["status"] = "ready"
     except Exception as exc:
+        diag["error"] = str(exc)
+        diag["status"] = "error"
         st.session_state["agent_voice_error"] = f"Transkription fehlgeschlagen: {exc}"
         st.session_state["agent_voice_status"] = "error"
+    st.session_state["agent_voice_diag"] = diag
 
 
 def _render_voice_capture() -> None:
@@ -751,8 +803,16 @@ def _render_voice_capture() -> None:
             st.success("Transkript bereit. Du kannst es jetzt prüfen, bearbeiten und in den Dialog übernehmen.")
         elif status == "error":
             st.error(st.session_state.get("agent_voice_error") or "Transkription fehlgeschlagen.")
+        elif status == "cached":
+            st.info("Diese Aufnahme wurde bereits transkribiert.")
+        elif audio is not None:
+            st.info("Aufnahme erkannt. Die Transkription wird verarbeitet.")
         else:
             st.info("Noch keine Aufnahme vorhanden.")
+
+        if st.session_state.get("agent_voice_debug"):
+            with st.expander("Diagnose (Testmodus)", expanded=True):
+                st.json(st.session_state.get("agent_voice_diag") or {})
 
         voice_text = st.text_area(
             "Transkript",
@@ -839,7 +899,7 @@ def render(ctx: Dict[str, Any]) -> None:
 
 
     st.markdown('<div class="coop-shell">', unsafe_allow_html=True)
-    st.markdown('<div class="coop-headline"><h1>Coop Agent v15</h1></div>', unsafe_allow_html=True)
+    st.markdown('<div class="coop-headline"><h1>Coop Agent v16</h1></div>', unsafe_allow_html=True)
     st.markdown('<div class="coop-sub">Starte mit Coop-Eingabe.</div>', unsafe_allow_html=True)
 
     if st.session_state.get("agent_help_open"):
