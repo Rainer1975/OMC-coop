@@ -691,19 +691,22 @@ def _transcribe_audio_bytes(audio_bytes: bytes, mime_type: str = "audio/wav") ->
                 pass
 
 
-def _voice_reset() -> None:
+def _voice_reset(increment_take: bool = False) -> None:
     st.session_state["agent_voice_text_value"] = ""
     st.session_state["agent_voice_text_rev"] = int(st.session_state.get("agent_voice_text_rev", 0)) + 1
     st.session_state["agent_voice_error"] = ""
     st.session_state["agent_voice_status"] = "idle"
     st.session_state["agent_audio_digest"] = ""
+    if increment_take:
+        st.session_state["agent_voice_take"] = int(st.session_state.get("agent_voice_take", 0)) + 1
 
 
-def _maybe_transcribe_audio() -> None:
-    audio = st.session_state.get("agent_voice_audio")
+def _maybe_transcribe_audio(audio) -> None:
     if audio is None:
         return
     audio_bytes = audio.getvalue()
+    if not audio_bytes:
+        return
     digest = hashlib.sha256(audio_bytes).hexdigest()
     if digest == st.session_state.get("agent_audio_digest"):
         return
@@ -713,7 +716,8 @@ def _maybe_transcribe_audio() -> None:
         return
     try:
         st.session_state["agent_voice_status"] = "transcribing"
-        text = _transcribe_audio_bytes(audio_bytes, getattr(audio, "type", "audio/wav") or "audio/wav")
+        mime_type = getattr(audio, "type", "audio/wav") or "audio/wav"
+        text = _transcribe_audio_bytes(audio_bytes, mime_type)
         st.session_state["agent_voice_text_value"] = text
         st.session_state["agent_voice_text_rev"] = int(st.session_state.get("agent_voice_text_rev", 0)) + 1
         st.session_state["agent_audio_digest"] = digest
@@ -738,7 +742,7 @@ def _render_voice_capture() -> None:
         )
         if audio is not None:
             st.audio(audio)
-            _maybe_transcribe_audio()
+            _maybe_transcribe_audio(audio)
 
         status = st.session_state.get("agent_voice_status")
         if status == "transcribing":
@@ -752,7 +756,6 @@ def _render_voice_capture() -> None:
 
         voice_text = st.text_area(
             "Transkript",
-            key=f"agent_voice_text_editor_{st.session_state.get('agent_voice_text_rev', 0)}",
             value=st.session_state.get("agent_voice_text_value", ""),
             height=180,
             placeholder="Hier erscheint das echte Transkript aus der OpenAI-Transkription.",
@@ -766,11 +769,10 @@ def _render_voice_capture() -> None:
             st.session_state["agent_prompt_value"] = ((current + " " + tr).strip() if current and tr else tr or current)
             st.session_state["agent_prompt_rev"] = int(st.session_state.get("agent_prompt_rev", 0)) + 1
             st.session_state["agent_voice_open"] = False
-            _voice_reset()
+            _voice_reset(increment_take=True)
             st.rerun()
         if c2.button("Neu aufnehmen", use_container_width=True):
-            _voice_reset()
-            st.session_state["agent_voice_take"] = int(st.session_state.get("agent_voice_take", 0)) + 1
+            _voice_reset(increment_take=True)
             st.session_state["agent_voice_open"] = True
             st.rerun()
         if c3.button("Schließen", use_container_width=True):
@@ -837,7 +839,7 @@ def render(ctx: Dict[str, Any]) -> None:
 
 
     st.markdown('<div class="coop-shell">', unsafe_allow_html=True)
-    st.markdown('<div class="coop-headline"><h1>Coop Agent</h1></div>', unsafe_allow_html=True)
+    st.markdown('<div class="coop-headline"><h1>Coop Agent v15</h1></div>', unsafe_allow_html=True)
     st.markdown('<div class="coop-sub">Starte mit Coop-Eingabe.</div>', unsafe_allow_html=True)
 
     if st.session_state.get("agent_help_open"):
