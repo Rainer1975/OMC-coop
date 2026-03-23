@@ -273,7 +273,8 @@ def _voice_reset(increment_take: bool = False) -> None:
 
 def _reset_dialog(keep_user: bool = True) -> None:
     profile = st.session_state.get("agent_auth_profile") if keep_user else None
-    username = st.session_state.get("agent_login_username", "")
+    # Do NOT write back to widget-bound keys like agent_login_username here.
+    # Streamlit forbids mutating them after instantiation in the same run.
     for key in [
         "agent_messages", "agent_draft", "agent_mode", "agent_help_open", "agent_prompt_value", "agent_prompt_rev",
         "agent_voice_open", "agent_voice_text_value", "agent_voice_error", "agent_voice_status", "agent_audio_digest",
@@ -285,7 +286,6 @@ def _reset_dialog(keep_user: bool = True) -> None:
             del st.session_state[key]
     _init_state()
     st.session_state["agent_auth_profile"] = profile
-    st.session_state["agent_login_username"] = username
 
 
 def _question_for(field: str) -> str:
@@ -1058,7 +1058,7 @@ def render(ctx: Dict[str, Any]) -> None:
         return
 
     st.markdown('<div class="coop-shell">', unsafe_allow_html=True)
-    st.markdown('<div class="coop-headline"><h1>Coop Agent v17</h1></div>', unsafe_allow_html=True)
+    st.markdown('<div class="coop-headline"><h1>Coop Agent v18</h1></div>', unsafe_allow_html=True)
     st.markdown('<div class="coop-sub">Hauptmenü · natürlicher KI-Dialog · Menüführung parallel nutzbar</div>', unsafe_allow_html=True)
     st.markdown('<div class="voice-hint">Bitte sprich deine Projektdaten ein. Alternativ kannst du einen Menüpunkt wählen.</div>', unsafe_allow_html=True)
 
