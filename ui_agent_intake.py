@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import streamlit as st
 from core import new_series
 
-__version__ = "2026.03.23.17"
+__version__ = "2026.03.23.19"
 
 DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -340,6 +340,86 @@ def _normalize_field_value(field: str, value: str) -> str:
         return ""
     return v
 
+
+
+
+def _menu_steps() -> List[Tuple[str, str]]:
+    return [
+        ("home", "1. Hauptmenü"),
+        ("capture", "2. Neue Eingabe"),
+        ("summary", "3. Zusammenfassung prüfen"),
+        ("search", "4. Projektinfos suchen"),
+    ]
+
+
+def _menu_guide_text() -> str:
+    mode = st.session_state.get("agent_mode") or "home"
+    current_field = st.session_state.get("agent_current_field")
+    confirm_field = st.session_state.get("agent_confirm_field")
+    if not _current_user():
+        return "Melde dich zuerst mit deinem Benutzernamen an."
+    if mode != "capture":
+        return "Starte im Hauptmenü mit **Neue Eingabe** oder sage direkt `Coop-Eingabe ...`."
+    if confirm_field:
+        return f"Bestätige jetzt **{FIELD_LABELS.get(confirm_field, confirm_field)}** per Ja/Nein oder korrigiere den Wert."
+    if current_field:
+        return f"Du bist in **{FIELD_LABELS.get(current_field, current_field)}**. Antworte mündlich oder schriftlich in einem ganzen Satz."
+    if st.session_state.get("agent_summary_offer"):
+        return "Die KI wartet auf deine Entscheidung zur **ZUSAMMENFASSUNG**."
+    if st.session_state.get("agent_save_offer"):
+        return "Die KI wartet auf deine Entscheidung zum **Speichern**."
+    return "Die Eingabe läuft. Du kannst jeden Unterpunkt auch direkt über das Menü anwählen."
+
+
+def _latest_user_utterance() -> str:
+    msgs = st.session_state.get("agent_messages") or []
+    for msg in reversed(msgs):
+        if msg.get("role") == "user":
+            return _norm(msg.get("content"))
+    return ""
+
+
+def _render_menu_guide() -> None:
+    mode = st.session_state.get("agent_mode") or "home"
+    labels = dict(_menu_steps())
+    with st.container(border=True):
+        st.markdown("### Menüführung")
+        cols = st.columns(len(labels))
+        for i, (key, label) in enumerate(labels.items()):
+            prefix = "➡️ " if ((key == "home" and mode != "capture" and st.session_state.get("agent_menu") == "home") or key == st.session_state.get("agent_menu") or (key == "capture" and mode == "capture")) else ""
+            cols[i].markdown(f"{prefix}{label}")
+        st.info(_menu_guide_text())
+
+
+def _render_dialog_views() -> None:
+    col1, col2 = st.columns([1.15, 0.85])
+    with col1:
+        with st.container(border=True):
+            st.markdown("### Sichtbarer Dialog")
+            user_sentence = _latest_user_utterance()
+            if user_sentence:
+                st.markdown(f"**Dein letzter Satz:** {user_sentence}")
+            else:
+                st.caption("Hier erscheint dein letzter gesprochener oder geschriebener Satz.")
+            msgs = st.session_state.get("agent_messages") or []
+            for msg in msgs[-6:]:
+                speaker = "Du" if msg.get("role") == "user" else "KI"
+                st.markdown(f"**{speaker}:** {msg.get('content','')}")
+    with col2:
+        with st.container(border=True):
+            st.markdown("### Transkript")
+            vt = _norm(st.session_state.get("agent_voice_text_value"))
+            if vt:
+                st.write(vt)
+            else:
+                st.caption("Nach der Sprachaufnahme erscheint hier das Transkript.")
+            draft = st.session_state.get("agent_draft") or {}
+            if draft:
+                st.markdown("### Bisher notiert")
+                for field in _field_order():
+                    val = _norm(draft.get(field))
+                    if val:
+                        st.markdown(f"- **{FIELD_LABELS.get(field, field)}:** {val}")
 
 def _project_options(ctx: Dict[str, Any]) -> List[str]:
     projects = []
@@ -1058,11 +1138,12 @@ def render(ctx: Dict[str, Any]) -> None:
         return
 
     st.markdown('<div class="coop-shell">', unsafe_allow_html=True)
-    st.markdown('<div class="coop-headline"><h1>Coop Agent v18</h1></div>', unsafe_allow_html=True)
+    st.markdown('<div class="coop-headline"><h1>Coop Agent v19</h1></div>', unsafe_allow_html=True)
     st.markdown('<div class="coop-sub">Hauptmenü · natürlicher KI-Dialog · Menüführung parallel nutzbar</div>', unsafe_allow_html=True)
     st.markdown('<div class="voice-hint">Bitte sprich deine Projektdaten ein. Alternativ kannst du einen Menüpunkt wählen.</div>', unsafe_allow_html=True)
 
     _render_menu_buttons(ctx)
+    _render_menu_guide()
 
     if st.session_state.get("agent_mode") == "capture":
         _render_submenu_buttons()
@@ -1070,12 +1151,14 @@ def render(ctx: Dict[str, Any]) -> None:
     if st.session_state.get("agent_help_open"):
         _render_help_box()
 
+    _render_dialog_views()
+
     if st.session_state.get("agent_last_saved"):
         info = st.session_state["agent_last_saved"]
         st.success(f"Gespeichert · DB #{info.get('entry_id')} · Tool: {_norm(info.get('task_id')) or 'kein Aufgabenobjekt'}")
 
     if st.session_state.get("agent_mode") == "home" and not st.session_state.get("agent_messages"):
-        _append("assistant", "Willkommen im Hauptmenü. Starte mit **Neue Eingabe** oder sprich direkt mit **Coop-Eingabe ...**.")
+        _append("assistant", "Willkommen im Hauptmenü. Ich führe dich Schritt für Schritt durch das Menü. Starte mit **Neue Eingabe** oder sprich direkt mit **Coop-Eingabe ...**.")
 
     for msg in st.session_state.get("agent_messages") or []:
         with st.chat_message(msg["role"]):
@@ -1089,7 +1172,7 @@ def render(ctx: Dict[str, Any]) -> None:
         key=f"agent_prompt_input_{st.session_state.get('agent_prompt_rev', 0)}",
         value=st.session_state.get("agent_prompt_value", ""),
         label_visibility="collapsed",
-        placeholder="Gib deine Projektdaten ein oder starte mit Coop-Eingabe",
+        placeholder="Sprich oder schreibe jetzt deinen nächsten Satz im Gespräch mit der KI",
     )
     st.session_state["agent_prompt_value"] = prompt_value
 
