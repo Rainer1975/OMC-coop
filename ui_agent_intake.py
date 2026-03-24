@@ -111,6 +111,40 @@ def _db(ctx: Dict[str, Any]) -> sqlite3.Connection:
     conn = sqlite3.connect(_db_path(ctx))
     conn.row_factory = sqlite3.Row
     conn.executescript(DB_SCHEMA)
+
+    # Schema-Migration für bestehende Deployments.
+    # CREATE TABLE IF NOT EXISTS erweitert vorhandene Tabellen nicht.
+    # Ältere agent_intake.db-Dateien haben z. B. kein due_hint-Feld.
+    table_cols = {row[1] for row in conn.execute("PRAGMA table_info(entries)")}
+    required_cols = {
+        "display_name": "TEXT",
+        "role_at_write": "TEXT",
+        "project": "TEXT",
+        "title": "TEXT",
+        "status": "TEXT",
+        "priority": "TEXT",
+        "next_step": "TEXT",
+        "blockers": "TEXT",
+        "due_hint": "TEXT",
+        "notes": "TEXT",
+        "source_text": "TEXT",
+        "entry_kind": "TEXT",
+        "payload_json": "TEXT",
+    }
+    for col, sql_type in required_cols.items():
+        if col not in table_cols:
+            conn.execute(f"ALTER TABLE entries ADD COLUMN {col} {sql_type}")
+
+    user_cols = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
+    required_user_cols = {
+        "display_name": "TEXT",
+        "role": "TEXT",
+        "created_at": "TEXT",
+    }
+    for col, sql_type in required_user_cols.items():
+        if col not in user_cols:
+            conn.execute(f"ALTER TABLE users ADD COLUMN {col} {sql_type}")
+
     conn.commit()
     return conn
 
