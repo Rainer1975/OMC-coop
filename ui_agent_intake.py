@@ -1011,14 +1011,15 @@ def _render_search_result() -> None:
 
 
 def _render_input_area(ctx: Dict[str, Any]) -> None:
-    input_col, mic_col = st.columns([18, 1.4], vertical_alignment="center")
+    input_col, mic_col = st.columns([18, 1.4], vertical_alignment="top")
     with input_col:
-        prompt_value = st.text_input(
+        prompt_value = st.text_area(
             "Coop Prompt",
             key=f"agent_prompt_input_{st.session_state.get('agent_prompt_rev', 0)}",
             value=st.session_state.get("agent_prompt_value", ""),
+            height=110,
             label_visibility="collapsed",
-            placeholder="Sprich oder schreibe deinen nächsten Satz …",
+            placeholder="Sprich oder schreibe dein Update hier hinein …",
         )
         st.session_state["agent_prompt_value"] = prompt_value
     with mic_col:
@@ -1031,16 +1032,16 @@ def _render_input_area(ctx: Dict[str, Any]) -> None:
                 st.session_state["agent_voice_open"] = True
             st.rerun()
 
+    if st.session_state.get("agent_voice_open"):
+        _render_voice_capture(compact=True)
+
     send_col, filler = st.columns([1.05, 3.5])
     if send_col.button("Senden", use_container_width=True, type="primary", key="agent_send_main"):
-        prompt = _norm(prompt_value)
+        prompt = _norm(st.session_state.get("agent_prompt_value"))
         if prompt:
             _handle_prompt(ctx, prompt)
         _clear_prompt()
         st.rerun()
-
-    if st.session_state.get("agent_voice_open"):
-        _render_voice_capture(compact=True)
 
     if st.session_state.get("agent_confirm_field"):
         y1, y2 = st.columns(2)
@@ -1086,10 +1087,8 @@ def _render_voice_capture(compact: bool = False) -> None:
             "Projektupdate aufnehmen",
             key=f"agent_voice_audio_{st.session_state.get('agent_voice_take', 0)}",
             label_visibility="collapsed",
-            sample_rate=16000,
         )
         if audio is not None:
-            st.audio(audio)
             _maybe_transcribe_audio(audio)
 
         status = st.session_state.get("agent_voice_status")
