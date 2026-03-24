@@ -88,6 +88,10 @@ def _low(x: Any) -> str:
     return _norm(x).lower()
 
 
+def _cmd(x: Any) -> str:
+    return re.sub(r"[^a-z0-9äöüß]+", " ", _low(x)).strip()
+
+
 def _slugify(s: str) -> str:
     s = _low(s)
     out = []
@@ -458,7 +462,7 @@ def _project_options(ctx: Dict[str, Any]) -> List[str]:
 
 def _infer_from_text(text: str, ctx: Dict[str, Any], draft: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
     t = _norm(text)
-    tl = _low(text)
+    tl = _cmd(text)
     out: Dict[str, str] = {}
     draft = draft or {}
     if not t:
@@ -522,7 +526,7 @@ def _ask_next_field() -> None:
         return
     _set_current_field(None)
     st.session_state["agent_summary_offer"] = True
-    _append("assistant", "Fertig erfasst. Tippe auf Zusammenfassung oder schreibe direkt SPEICHERN.")
+    _append("assistant", "Fertig erfasst. Sage jetzt ZUSAMMENFASSUNG für die Übersicht oder SPEICHERN zum Speichern.")
 
 
 def _begin_new_capture(prefill: str = "", ctx: Optional[Dict[str, Any]] = None) -> None:
@@ -541,7 +545,7 @@ def _begin_new_capture(prefill: str = "", ctx: Optional[Dict[str, Any]] = None) 
         for k, v in inferred.items():
             if _norm(v) or k in {"blockers", "notes", "due_hint"}:
                 st.session_state["agent_draft"][k] = _normalize_field_value(k, v)
-    _append("assistant", "Neuer Eintrag gestartet.")
+    _append("assistant", "Neuer Eintrag gestartet. Ich führe dich Schritt für Schritt durch die Eingabe.")
     _ask_next_field()
 
 
@@ -742,11 +746,11 @@ def _show_summary() -> None:
         _append("assistant", "Es gibt noch keine erfassten Daten.")
         return
     st.session_state["agent_menu"] = "summary"
-    _append("assistant", "Hier ist die ZUSAMMENFASSUNG.")
+    _append("assistant", "Hier ist die Zusammenfassung.")
 
 
 def _handle_yes_no(answer: str, ctx: Dict[str, Any]) -> bool:
-    al = _low(answer)
+    al = _cmd(answer)
     yes = al in {"ja", "j", "yes", "ok", "okay", "passt", "stimmt"}
     no = al in {"nein", "n", "no"}
     if st.session_state.get("agent_confirm_field"):
@@ -761,7 +765,7 @@ def _handle_yes_no(answer: str, ctx: Dict[str, Any]) -> bool:
         if yes:
             _show_summary()
         st.session_state["agent_save_offer"] = True
-        _append("assistant", "Möchtest du den Eintrag jetzt speichern? Ja oder nein. Alternativ kannst du auch SPEICHERN sagen.")
+        _append("assistant", "Möchtest du den Eintrag jetzt speichern? Antworte mit JA oder NEIN. Du kannst auch direkt SPEICHERN sagen.")
         return True
     if st.session_state.get("agent_save_offer"):
         st.session_state["agent_save_offer"] = False
@@ -773,7 +777,7 @@ def _handle_yes_no(answer: str, ctx: Dict[str, Any]) -> bool:
             st.session_state["agent_mode"] = "home"
             st.session_state["agent_menu"] = "home"
         else:
-            _append("assistant", "Okay, ich speichere noch nicht. Du kannst korrigieren, ZUSAMMENFASSUNG sagen oder später SPEICHERN.")
+            _append("assistant", "Okay, noch nicht gespeichert. Sage ZUSAMMENFASSUNG, KORRIGIEREN oder SPEICHERN.")
         return True
     return False
 
@@ -837,18 +841,20 @@ def _handle_prompt(ctx: Dict[str, Any], prompt: str) -> None:
     if not text:
         return
     _append("user", text)
-    tl = _low(text)
+    tl = _cmd(text)
 
-    if tl.startswith("hey projekt"):
-        query = _norm(text[11:])
+    raw_low = _low(text)
+
+    if raw_low.startswith("hey projekt"):
+        query = _norm(re.sub(r"^hey projekt\s*", "", text, flags=re.IGNORECASE))
         if not query:
             _append("assistant", "Nenne nach `Hey Projekt` bitte den Projektnamen oder Suchbegriff.")
             return
         _search_project(ctx, query)
         return
 
-    if tl.startswith("coop-eingabe"):
-        body = _norm(text[len("coop-eingabe"):])
+    if raw_low.startswith("coop-eingabe") or raw_low.startswith("coop eingabe"):
+        body = _norm(re.sub(r"^coop[- ]eingabe\s*", "", text, flags=re.IGNORECASE))
         _begin_new_capture(body, ctx)
         return
 
@@ -861,16 +867,20 @@ def _handle_prompt(ctx: Dict[str, Any], prompt: str) -> None:
         return
     if tl in {"suche", "projekt suchen"}:
         st.session_state["agent_menu"] = "search"
-        _append("assistant", "Okay. Suche mit `Hey Projekt ...` nach bestehenden Informationen.")
+        _append("assistant", "Suche gestartet. Sage oder schreibe: Hey Projekt <Name>.")
         return
     if tl in SUMMARY_COMMANDS:
         _show_summary()
         return
     if tl in {"hilfe"}:
-        st.session_state["agent_help_open"] = True
+        _append("assistant", "Verfügbare Befehle: NEU, ZUSAMMENFASSUNG, SPEICHERN, KORRIGIEREN, ZURÜCK, HEY PROJEKT <NAME>, ABMELDEN.")
+        return
+    if tl in {"abmelden", "logout"}:
+        st.session_state["agent_auth_profile"] = None
+        _reset_dialog(keep_user=False)
         return
 
-    _append("assistant", "Unklare Eingabe. Nutze oben Neu, Suche oder Zusammenfassung, oder antworte direkt auf die aktuelle Frage.")
+    _append("assistant", "Unklare Eingabe. Sage NEU für einen neuen Eintrag, HEY PROJEKT <NAME> für Suche oder antworte direkt auf die aktuelle Frage.")
 
 
 def _transcribe_audio_bytes(audio_bytes: bytes, mime_type: str = "audio/wav") -> tuple[str, dict]:
@@ -1167,23 +1177,7 @@ def render(ctx: Dict[str, Any]) -> None:
     st.markdown('<div class="coop-title">Coop Agent</div>', unsafe_allow_html=True)
 
     if not st.session_state.get("agent_messages"):
-        _append("assistant", "Willkommen. Klicke auf Neu. Dann führe ich dich Schritt für Schritt durch die Eingabe.")
-
-    toolbar = st.columns([1.15, 1.15, 1.15, 1.0])
-    if toolbar[0].button("Neu", use_container_width=True, type="primary"):
-        _begin_new_capture(ctx=ctx)
-        st.rerun()
-    if toolbar[1].button("Zusammenfassung", use_container_width=True):
-        _show_summary()
-        st.rerun()
-    if toolbar[2].button("Suche", use_container_width=True):
-        st.session_state["agent_menu"] = "search"
-        _append("assistant", "Suche gestartet. Schreibe: Hey Projekt <Name>.")
-        st.rerun()
-    if toolbar[3].button("Abmelden", use_container_width=True):
-        st.session_state["agent_auth_profile"] = None
-        _reset_dialog(keep_user=False)
-        st.rerun()
+        _append("assistant", "Willkommen. Ich führe dich dialoggesteuert durch alles. Sage NEU für einen neuen Eintrag, HEY PROJEKT <NAME> für Suche oder ABMELDEN zum Logout.")
 
     mode = st.session_state.get("agent_mode")
     current_field = st.session_state.get("agent_current_field")
@@ -1191,9 +1185,11 @@ def render(ctx: Dict[str, Any]) -> None:
         label = FIELD_LABELS.get(current_field, current_field)
         st.markdown(f'<div class="coop-status">Aktueller Schritt: <strong>{label}</strong>. Antworte direkt unten per Text oder Mikrofon.</div>', unsafe_allow_html=True)
     elif st.session_state.get("agent_menu") == "search":
-        st.markdown('<div class="coop-status">Suche: Schreibe unten <strong>Hey Projekt &lt;Name&gt;</strong>.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="coop-status">Suchmodus aktiv. Sage oder schreibe: <strong>Hey Projekt &lt;Name&gt;</strong>.</div>', unsafe_allow_html=True)
     elif st.session_state.get("agent_menu") == "summary":
-        st.markdown('<div class="coop-status">Zusammenfassung geöffnet.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="coop-status">Zusammenfassung geöffnet. Sage SPEICHERN, KORRIGIEREN oder NEU.</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="coop-status">Dialogsteuerung aktiv. Befehle: NEU, ZUSAMMENFASSUNG, SPEICHERN, HEY PROJEKT &lt;NAME&gt;, ABMELDEN.</div>', unsafe_allow_html=True)
 
     _render_dialog_views()
     _render_input_area(ctx)
