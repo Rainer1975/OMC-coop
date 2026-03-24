@@ -510,11 +510,13 @@ def _ask_next_field() -> None:
     if missing:
         field = missing[0]
         _set_current_field(field)
-        _append("assistant", f"Okay. {_question_for(field)}")
+        step_no = len(FIELDS) - len(missing) + 1
+        total = len(FIELDS)
+        _append("assistant", f"{step_no}/{total}: {_question_for(field)}")
         return
     _set_current_field(None)
     st.session_state["agent_summary_offer"] = True
-    _append("assistant", "Ich habe alles notiert. Möchtest du die ZUSAMMENFASSUNG ansehen? Ja oder nein?")
+    _append("assistant", "Fertig erfasst. Tippe auf Zusammenfassung oder schreibe direkt SPEICHERN.")
 
 
 def _begin_new_capture(prefill: str = "", ctx: Optional[Dict[str, Any]] = None) -> None:
@@ -533,7 +535,7 @@ def _begin_new_capture(prefill: str = "", ctx: Optional[Dict[str, Any]] = None) 
         for k, v in inferred.items():
             if _norm(v) or k in {"blockers", "notes", "due_hint"}:
                 st.session_state["agent_draft"][k] = _normalize_field_value(k, v)
-    _append("assistant", "Wir erfassen jetzt dein Projektupdate. Die mündliche Eingabe ist der Hauptweg. Du kannst parallel aber auch Menü und Text nutzen.")
+    _append("assistant", "Neuer Eintrag gestartet.")
     _ask_next_field()
 
 
@@ -853,7 +855,7 @@ def _handle_prompt(ctx: Dict[str, Any], prompt: str) -> None:
         st.session_state["agent_help_open"] = True
         return
 
-    _append("assistant", "Wähle im Hauptmenü einen Punkt oder starte direkt mit `Coop-Eingabe ...`.")
+    _append("assistant", "Unklare Eingabe. Nutze oben Neu, Suche oder Zusammenfassung, oder antworte direkt auf die aktuelle Frage.")
 
 
 def _transcribe_audio_bytes(audio_bytes: bytes, mime_type: str = "audio/wav") -> tuple[str, dict]:
@@ -1003,33 +1005,27 @@ def _render_input_area(ctx: Dict[str, Any]) -> None:
     rev = int(st.session_state.get("agent_prompt_rev", 0))
     widget_key = f"agent_prompt_widget_{rev}"
     seed_value = st.session_state.get("agent_prompt_value", "")
-    voice_open = bool(st.session_state.get("agent_voice_open"))
 
-    top = st.columns([12, 1.2, 1.7], vertical_alignment="bottom")
+    top = st.columns([10, 2.2, 1.8], vertical_alignment="bottom")
     with top[0]:
         prompt = st.text_area(
             "Nachricht",
             key=widget_key,
             value=seed_value,
-            height=110,
+            height=96,
             label_visibility="collapsed",
-            placeholder="Schreibe dein Update oder nutze das Mikrofon …",
+            placeholder="Antwort hier eintippen oder per Mikrofon aufnehmen …",
         )
         st.session_state["agent_prompt_value"] = prompt
     with top[1]:
-        if voice_open:
-            audio = st.audio_input(
-                "Aufnahme",
-                key=f"agent_voice_audio_{st.session_state.get('agent_voice_take', 0)}",
-                label_visibility="collapsed",
-            )
-            if audio is not None:
-                _maybe_transcribe_audio(audio)
-                if st.session_state.get("agent_voice_status") == "ready" and _apply_transcript_to_prompt():
-                    st.rerun()
-        else:
-            if st.button("🎙", use_container_width=True, key="agent_mic_inline"):
-                st.session_state["agent_voice_open"] = True
+        audio = st.audio_input(
+            "Aufnahme",
+            key=f"agent_voice_audio_{st.session_state.get('agent_voice_take', 0)}",
+            label_visibility="collapsed",
+        )
+        if audio is not None:
+            _maybe_transcribe_audio(audio)
+            if st.session_state.get("agent_voice_status") == "ready" and _apply_transcript_to_prompt():
                 st.rerun()
     with top[2]:
         if st.button("Senden", use_container_width=True, type="primary", key="agent_send_main"):
@@ -1039,17 +1035,8 @@ def _render_input_area(ctx: Dict[str, Any]) -> None:
             _clear_prompt()
             st.rerun()
 
-    if voice_open:
-        row = st.columns([1.5, 5])
-        if row[0].button("Abbrechen", use_container_width=True, key="voice_cancel_inline"):
-            _voice_reset(increment_take=True)
-            st.session_state["agent_voice_open"] = False
-            st.rerun()
-        status = st.session_state.get("agent_voice_status")
-        if status == "error":
-            row[1].caption(_norm(st.session_state.get("agent_voice_error")) or "Transkription fehlgeschlagen.")
-        else:
-            row[1].caption("Aufnahme läuft im selben Eingabebereich. Nach Abschluss wird der Text direkt übernommen.")
+    if st.session_state.get("agent_voice_status") == "error":
+        st.caption(_norm(st.session_state.get("agent_voice_error")) or "Transkription fehlgeschlagen.")
 
     if st.session_state.get("agent_confirm_field"):
         y1, y2 = st.columns(2)
@@ -1138,12 +1125,11 @@ def render(ctx: Dict[str, Any]) -> None:
         """
         <style>
         [data-testid="stSidebar"], header[data-testid="stHeader"] {display:none !important;}
-        .block-container {padding-top: 1.2rem; max-width: 900px;}
+        .block-container {padding-top: 1rem; max-width: 860px;}
         .coop-center {max-width: 520px; margin: 16vh auto 0 auto; text-align:center;}
-        .coop-shell {max-width: 900px; margin: 0 auto;}
-        .coop-title {font-size: 1.8rem; font-weight: 650; letter-spacing: -0.03em; text-align:center; margin-bottom:.9rem;}
-        .coop-muted {color:#6e6e73; margin-top:.75rem; text-align:center;}
-        .coop-toolbar {margin-bottom: 1rem;}
+        .coop-shell {max-width: 860px; margin: 0 auto;}
+        .coop-title {font-size: 1.9rem; font-weight: 700; letter-spacing: -0.03em; text-align:center; margin-bottom:1rem;}
+        .coop-toolbar {margin: 0 0 1rem 0;}
         .coop-bubble {border-radius:18px; padding:12px 14px; margin:10px 0; max-width:92%; line-height:1.45;}
         .coop-bubble.user {background:#111827; color:#fff; margin-left:auto;}
         .coop-bubble.assistant {background:#f1f1f3; color:#1d1d1f; margin-right:auto;}
@@ -1152,6 +1138,7 @@ def render(ctx: Dict[str, Any]) -> None:
         .stButton>button[kind="primary"] {background:#111827; color:#fff; border-color:#111827;}
         div[data-testid="stTextArea"] textarea {border-radius:18px !important; border:1px solid #d8d8dc !important; background:#fff !important;}
         [data-testid="stAudioInput"] audio {display:none !important;}
+        .coop-status {color:#6e6e73; margin:.2rem 0 .75rem 0;}
         </style>
         """,
         unsafe_allow_html=True,
@@ -1165,10 +1152,10 @@ def render(ctx: Dict[str, Any]) -> None:
     st.markdown('<div class="coop-title">Coop Agent</div>', unsafe_allow_html=True)
 
     if not st.session_state.get("agent_messages"):
-        _append("assistant", "Willkommen. Lege ein neues Projekt an, starte eine neue Eingabe oder suche nach einem bestehenden Projekt.")
+        _append("assistant", "Willkommen. Klicke auf Neu. Dann führe ich dich Schritt für Schritt durch die Eingabe.")
 
-    toolbar = st.columns([1.2, 1.2, 1.2, 1.2])
-    if toolbar[0].button("Neue Eingabe", use_container_width=True, type="primary"):
+    toolbar = st.columns([1.15, 1.15, 1.15, 1.0])
+    if toolbar[0].button("Neu", use_container_width=True, type="primary"):
         _begin_new_capture(ctx=ctx)
         st.rerun()
     if toolbar[1].button("Zusammenfassung", use_container_width=True):
@@ -1176,12 +1163,22 @@ def render(ctx: Dict[str, Any]) -> None:
         st.rerun()
     if toolbar[2].button("Suche", use_container_width=True):
         st.session_state["agent_menu"] = "search"
-        _append("assistant", "Suche mit ‚Hey Projekt …‘ nach bestehenden Informationen.")
+        _append("assistant", "Suche gestartet. Schreibe: Hey Projekt <Name>.")
         st.rerun()
     if toolbar[3].button("Abmelden", use_container_width=True):
         st.session_state["agent_auth_profile"] = None
         _reset_dialog(keep_user=False)
         st.rerun()
+
+    mode = st.session_state.get("agent_mode")
+    current_field = st.session_state.get("agent_current_field")
+    if mode == "capture" and current_field:
+        label = FIELD_LABELS.get(current_field, current_field)
+        st.markdown(f'<div class="coop-status">Aktueller Schritt: <strong>{label}</strong>. Antworte direkt unten per Text oder Mikrofon.</div>', unsafe_allow_html=True)
+    elif st.session_state.get("agent_menu") == "search":
+        st.markdown('<div class="coop-status">Suche: Schreibe unten <strong>Hey Projekt &lt;Name&gt;</strong>.</div>', unsafe_allow_html=True)
+    elif st.session_state.get("agent_menu") == "summary":
+        st.markdown('<div class="coop-status">Zusammenfassung geöffnet.</div>', unsafe_allow_html=True)
 
     _render_dialog_views()
     _render_input_area(ctx)
@@ -1190,8 +1187,6 @@ def render(ctx: Dict[str, Any]) -> None:
         _render_summary_box()
     if st.session_state.get("agent_menu") == "search":
         _render_search_result()
-    if st.session_state.get("agent_help_open"):
-        _render_help_box()
 
     if not _openai_available():
         st.caption("OpenAI-Sprachtranskription ist noch nicht aktiv. Hinterlege OPENAI_API_KEY in den Streamlit-Secrets.")
