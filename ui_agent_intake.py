@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import streamlit as st
 from core import new_series
 
-__version__ = "2026.03.24.22"
+__version__ = "2026.03.24.23"
 
 DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -312,10 +312,16 @@ def _field_order() -> List[str]:
     return [k for k, _ in FIELDS]
 
 
+OPTIONAL_EMPTY_FIELDS = {"blockers", "due_hint", "notes"}
+
+
 def _missing_fields(draft: Dict[str, Any]) -> List[str]:
     out = []
     for field in _field_order():
-        if not _norm(draft.get(field)):
+        value = _norm(draft.get(field))
+        if field in OPTIONAL_EMPTY_FIELDS:
+            continue
+        if not value:
             out.append(field)
     return out
 
@@ -552,6 +558,8 @@ def _accept_confirmed_value() -> None:
     value = st.session_state.get("agent_confirm_value")
     if not field:
         return
+    if field in OPTIONAL_EMPTY_FIELDS and _low(value) in NONE_WORDS:
+        value = ""
     draft = dict(st.session_state.get("agent_draft") or {})
     draft[field] = value
     st.session_state["agent_draft"] = draft
@@ -771,6 +779,13 @@ def _handle_yes_no(answer: str, ctx: Dict[str, Any]) -> bool:
 
 
 def _handle_capture_input(ctx: Dict[str, Any], text: str) -> None:
+    confirm_field = st.session_state.get("agent_confirm_field")
+    if confirm_field:
+        normalized_text = _normalize_field_value(confirm_field, text)
+        confirmed_value = _norm(st.session_state.get("agent_confirm_value"))
+        if normalized_text == confirmed_value:
+            _accept_confirmed_value()
+            return
     if _handle_yes_no(text, ctx):
         return
     tl = _low(text)
