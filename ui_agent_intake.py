@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import streamlit as st
 from core import new_series
 
-__version__ = "2026.03.23.19"
+__version__ = "2026.03.23.20"
 
 DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -237,7 +237,7 @@ def _init_state() -> None:
         "agent_audio_digest": "",
         "agent_voice_take": 0,
         "agent_voice_diag": {},
-        "agent_voice_debug": True,
+        "agent_voice_debug": False,
         "agent_current_field": None,
         "agent_confirm_field": None,
         "agent_confirm_value": None,
@@ -381,45 +381,68 @@ def _latest_user_utterance() -> str:
 
 def _render_menu_guide() -> None:
     mode = st.session_state.get("agent_mode") or "home"
-    labels = dict(_menu_steps())
-    with st.container(border=True):
-        st.markdown("### Menüführung")
-        cols = st.columns(len(labels))
-        for i, (key, label) in enumerate(labels.items()):
-            prefix = "➡️ " if ((key == "home" and mode != "capture" and st.session_state.get("agent_menu") == "home") or key == st.session_state.get("agent_menu") or (key == "capture" and mode == "capture")) else ""
-            cols[i].markdown(f"{prefix}{label}")
-        st.info(_menu_guide_text())
+    current_field = st.session_state.get("agent_current_field")
+    confirm_field = st.session_state.get("agent_confirm_field")
+    with st.container():
+        st.markdown('<div class="coop-panel">', unsafe_allow_html=True)
+        st.markdown('<div class="coop-panel-title">Menüführung</div>', unsafe_allow_html=True)
+        labels = dict(_menu_steps())
+        active = "capture" if mode == "capture" else st.session_state.get("agent_menu") or "home"
+        pills = []
+        for key, label in labels.items():
+            cls = "coop-step active" if key == active else "coop-step"
+            pills.append(f"<span class='{cls}'>{label}</span>")
+        st.markdown('<div class="coop-steps">' + ''.join(pills) + '</div>', unsafe_allow_html=True)
+        if not _current_user():
+            guide = "Melde dich zuerst mit deinem Benutzernamen an."
+        elif mode != "capture":
+            guide = "Wähle im Hauptmenü ‘Neue Eingabe’ oder starte direkt mit ‘Coop-Eingabe …’."
+        elif confirm_field:
+            guide = f"Bestätige jetzt {FIELD_LABELS.get(confirm_field, confirm_field)} mit Ja oder Nein, oder korrigiere den Wert."
+        elif current_field:
+            guide = f"Als Nächstes braucht die KI: {FIELD_LABELS.get(current_field, current_field)}."
+        elif st.session_state.get("agent_summary_offer"):
+            guide = "Die KI fragt jetzt, ob du die Zusammenfassung ansehen willst."
+        elif st.session_state.get("agent_save_offer"):
+            guide = "Die KI fragt jetzt, ob gespeichert werden soll."
+        else:
+            guide = "Die Eingabe läuft. Du kannst sprechen, schreiben oder direkt in einen Unterpunkt springen."
+        st.markdown(f'<div class="coop-guide">{guide}</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
 
 def _render_dialog_views() -> None:
-    col1, col2 = st.columns([1.15, 0.85])
-    with col1:
-        with st.container(border=True):
-            st.markdown("### Sichtbarer Dialog")
-            user_sentence = _latest_user_utterance()
-            if user_sentence:
-                st.markdown(f"**Dein letzter Satz:** {user_sentence}")
-            else:
-                st.caption("Hier erscheint dein letzter gesprochener oder geschriebener Satz.")
-            msgs = st.session_state.get("agent_messages") or []
-            for msg in msgs[-6:]:
-                speaker = "Du" if msg.get("role") == "user" else "KI"
-                st.markdown(f"**{speaker}:** {msg.get('content','')}")
-    with col2:
-        with st.container(border=True):
-            st.markdown("### Transkript")
-            vt = _norm(st.session_state.get("agent_voice_text_value"))
-            if vt:
-                st.write(vt)
-            else:
-                st.caption("Nach der Sprachaufnahme erscheint hier das Transkript.")
-            draft = st.session_state.get("agent_draft") or {}
-            if draft:
-                st.markdown("### Bisher notiert")
-                for field in _field_order():
-                    val = _norm(draft.get(field))
-                    if val:
-                        st.markdown(f"- **{FIELD_LABELS.get(field, field)}:** {val}")
+    draft = st.session_state.get("agent_draft") or {}
+    transcript = _norm(st.session_state.get("agent_voice_text_value"))
+    left, right = st.columns([1.35, 0.95])
+    with left:
+        st.markdown('<div class="coop-panel">', unsafe_allow_html=True)
+        st.markdown('<div class="coop-panel-title">Gespräch</div>', unsafe_allow_html=True)
+        msgs = st.session_state.get("agent_messages") or []
+        if not msgs:
+            st.markdown('<div class="coop-empty">Hier erscheint der sichtbare Dialog zwischen dir und der KI.</div>', unsafe_allow_html=True)
+        for msg in msgs[-10:]:
+            role = msg.get("role")
+            cls = "user" if role == "user" else "assistant"
+            speaker = "Du" if role == "user" else "KI"
+            content = _norm(msg.get("content"))
+            st.markdown(f'<div class="coop-bubble {cls}"><div class="coop-bubble-speaker">{speaker}</div><div>{content}</div></div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    with right:
+        st.markdown('<div class="coop-panel">', unsafe_allow_html=True)
+        st.markdown('<div class="coop-panel-title">Transkript &amp; Notizen</div>', unsafe_allow_html=True)
+        if transcript:
+            st.markdown(f'<div class="coop-transcript">{transcript}</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="coop-empty">Nach der Aufnahme erscheint hier das Transkript.</div>', unsafe_allow_html=True)
+        if draft:
+            st.markdown('<div class="coop-mini-title">Bisher notiert</div>', unsafe_allow_html=True)
+            for field in _field_order():
+                value = _norm(draft.get(field))
+                if value or field in (st.session_state.get("agent_history_fields") or []):
+                    display = value or "keine"
+                    st.markdown(f'<div class="coop-line"><span>{FIELD_LABELS.get(field, field)}</span><strong>{display}</strong></div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
 def _project_options(ctx: Dict[str, Any]) -> List[str]:
     projects = []
@@ -988,29 +1011,41 @@ def _render_search_result() -> None:
 
 
 def _render_help_box() -> None:
-    with st.container(border=True):
-        st.markdown("### Hilfe")
-        st.info(
-            "\n".join([
-                "Sprachmodus ist der Primärmodus. Bitte sprich dein Update zuerst ein.",
-                "Wichtige Befehle:",
-                "- Coop-Eingabe ...",
-                "- ZUSAMMENFASSUNG",
-                "- SPEICHERN",
-                "- Hey Projekt ...",
-                "- zurück",
-                "- korrigieren",
-                "- neu starten",
-            ])
-        )
+    st.markdown('<div class="coop-panel">', unsafe_allow_html=True)
+    st.markdown('<div class="coop-panel-title">Hilfe</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="coop-help">'
+        '<div>Sprachmodus ist der Primärmodus. Text ist nur der Fallback.</div>'
+        '<div><strong>Befehle</strong></div>'
+        '<div>Coop-Eingabe …</div>'
+        '<div>ZUSAMMENFASSUNG</div>'
+        '<div>SPEICHERN</div>'
+        '<div>Hey Projekt …</div>'
+        '<div>zurück · korrigieren · neu starten</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 def _render_voice_capture() -> None:
-    if not st.session_state.get("agent_voice_open"):
-        return
-    with st.container(border=True):
-        st.markdown("### 🎙 Mündliche Dateneingabe")
-        st.caption("Bitte sprich deine Projektdaten ein. Nach dem zweiten Klick wird die Aufnahme direkt über OpenAI transkribiert.")
+    voice_open = bool(st.session_state.get("agent_voice_open"))
+    st.markdown('<div class="coop-panel coop-voice">', unsafe_allow_html=True)
+    st.markdown('<div class="coop-panel-title">Mündliche Dateneingabe</div>', unsafe_allow_html=True)
+    st.markdown('<div class="coop-voice-hint">Bitte sprich dein Projektupdate ein. Die Spracheingabe ist der Primärmodus.</div>', unsafe_allow_html=True)
+    cols = st.columns([1.4, 1, 1])
+    if cols[0].button("Spracheingabe öffnen", use_container_width=True, type="primary"):
+        st.session_state["agent_voice_open"] = True
+        st.rerun()
+    if cols[1].button("Neu aufnehmen", use_container_width=True):
+        _voice_reset(increment_take=True)
+        st.session_state["agent_voice_open"] = True
+        st.rerun()
+    if cols[2].button("Schließen", use_container_width=True):
+        st.session_state["agent_voice_open"] = False
+        st.rerun()
+
+    if voice_open:
         audio = st.audio_input(
             "Projektupdate aufnehmen",
             key=f"agent_voice_audio_{st.session_state.get('agent_voice_take', 0)}",
@@ -1022,29 +1057,27 @@ def _render_voice_capture() -> None:
             _maybe_transcribe_audio(audio)
 
         status = st.session_state.get("agent_voice_status")
+        status_text = "Bereit für Aufnahme."
         if status == "ready":
-            st.success("Transkript bereit. Prüfe es kurz und übernimm es dann in den Dialog.")
+            status_text = "Transkript ist da. Du kannst es prüfen und ins Gespräch übernehmen."
         elif status == "error":
-            st.error(st.session_state.get("agent_voice_error") or "Transkription fehlgeschlagen.")
+            status_text = _norm(st.session_state.get("agent_voice_error")) or "Transkription fehlgeschlagen."
         elif status == "cached":
-            st.info("Diese Aufnahme wurde bereits transkribiert.")
-        else:
-            st.info("Noch keine Aufnahme vorhanden.")
-
-        if st.session_state.get("agent_voice_debug"):
-            with st.expander("Diagnose (Testmodus)", expanded=False):
-                st.json(st.session_state.get("agent_voice_diag") or {})
+            status_text = "Diese Aufnahme wurde bereits transkribiert."
+        elif status == "transcribing":
+            status_text = "Transkription läuft …"
+        st.markdown(f'<div class="coop-status">{status_text}</div>', unsafe_allow_html=True)
 
         voice_text = st.text_area(
             "Transkript",
             value=st.session_state.get("agent_voice_text_value", ""),
-            height=180,
-            placeholder="Hier erscheint das echte Transkript aus der OpenAI-Transkription.",
+            height=160,
+            placeholder="Hier erscheint das Transkript. Du kannst es direkt korrigieren.",
+            label_visibility="collapsed",
         )
         st.session_state["agent_voice_text_value"] = voice_text
 
-        c1, c2, c3 = st.columns(3)
-        if c1.button("In Eingabefeld übernehmen", type="primary", use_container_width=True):
+        if st.button("Transkript ins Gespräch übernehmen", use_container_width=True):
             current = _norm(st.session_state.get("agent_prompt_value"))
             tr = _norm(voice_text)
             st.session_state["agent_prompt_value"] = ((current + " " + tr).strip() if current and tr else tr or current)
@@ -1052,15 +1085,11 @@ def _render_voice_capture() -> None:
             st.session_state["agent_voice_open"] = False
             _voice_reset(increment_take=True)
             st.rerun()
-        if c2.button("Neu aufnehmen", use_container_width=True):
-            _voice_reset(increment_take=True)
-            st.session_state["agent_voice_open"] = True
-            st.rerun()
-        if c3.button("Schließen", use_container_width=True):
-            st.session_state["agent_voice_open"] = False
-            _voice_reset()
-            st.rerun()
 
+        if st.session_state.get("agent_voice_debug"):
+            with st.expander("Diagnose", expanded=False):
+                st.json(st.session_state.get("agent_voice_diag") or {})
+    st.markdown('</div>', unsafe_allow_html=True)
 
 def _render_login(ctx: Dict[str, Any]) -> None:
     st.markdown('<div class="coop-center">', unsafe_allow_html=True)
@@ -1078,15 +1107,19 @@ def _render_login(ctx: Dict[str, Any]) -> None:
 
 
 def _render_menu_buttons(ctx: Dict[str, Any]) -> None:
+    st.markdown('<div class="coop-panel">', unsafe_allow_html=True)
+    st.markdown('<div class="coop-panel-title">Hauptmenü</div>', unsafe_allow_html=True)
     c1, c2, c3, c4, c5 = st.columns(5)
     if c1.button("Neue Eingabe", use_container_width=True, type="primary"):
         _begin_new_capture(ctx=ctx)
         st.rerun()
     if c2.button("Suche", use_container_width=True):
         st.session_state["agent_menu"] = "search"
+        _append("assistant", "Okay. Suche mit ‘Hey Projekt …’ nach bestehenden Informationen.")
         st.rerun()
     if c3.button("Zusammenfassung", use_container_width=True):
         st.session_state["agent_menu"] = "summary"
+        _show_summary()
         st.rerun()
     if c4.button("Hilfe", use_container_width=True):
         st.session_state["agent_help_open"] = not bool(st.session_state.get("agent_help_open"))
@@ -1095,22 +1128,27 @@ def _render_menu_buttons(ctx: Dict[str, Any]) -> None:
         st.session_state["agent_auth_profile"] = None
         _reset_dialog(keep_user=False)
         st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 def _render_submenu_buttons() -> None:
     if st.session_state.get("agent_mode") != "capture":
         return
+    st.markdown('<div class="coop-panel">', unsafe_allow_html=True)
+    st.markdown('<div class="coop-panel-title">Untermenü Eingabe</div>', unsafe_allow_html=True)
     labels = [(field, FIELD_LABELS.get(field, field)) for field in _field_order()]
     cols = st.columns(3)
+    history = set(st.session_state.get("agent_history_fields") or [])
     for idx, (field, label) in enumerate(labels):
         value = _norm((st.session_state.get("agent_draft") or {}).get(field))
-        style = "✅ " if value or field in {"blockers", "due_hint", "notes"} and field in (st.session_state.get("agent_history_fields") or []) else "• "
-        if cols[idx % 3].button(style + label, key=f"submenu_{field}", use_container_width=True):
+        prefix = "✓ " if (value or field in history) else ""
+        if cols[idx % 3].button(prefix + label, key=f"submenu_{field}", use_container_width=True):
             st.session_state["agent_current_field"] = field
             st.session_state["agent_confirm_field"] = None
             st.session_state["agent_confirm_value"] = None
-            _append("assistant", f"Okay, wir springen zu **{label}**. {_question_for(field)}")
+            _append("assistant", f"Okay, wir springen zu {label}. {_question_for(field)}")
             st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 def render(ctx: Dict[str, Any]) -> None:
@@ -1121,13 +1159,31 @@ def render(ctx: Dict[str, Any]) -> None:
         """
         <style>
         [data-testid="stSidebar"], header[data-testid="stHeader"] {display:none !important;}
-        .block-container {padding-top: 1.4rem; max-width: 980px;}
-        .coop-center {max-width: 760px; margin: 12vh auto 0 auto; text-align:center;}
-        .coop-muted {color:#6b7280; margin-top:.75rem;}
-        .coop-shell {max-width: 920px; margin: 0 auto;}
-        .coop-headline {text-align:center; margin-bottom:.3rem;}
-        .coop-sub {text-align:center; color:#6b7280; margin-bottom:1rem;}
-        .voice-hint {text-align:center; font-weight:700; color:#0f172a; margin-bottom:.8rem;}
+        .block-container {padding-top: 1.5rem; max-width: 1040px;}
+        .coop-center {max-width: 520px; margin: 16vh auto 0 auto; text-align:center;}
+        .coop-shell {max-width: 1020px; margin: 0 auto;}
+        .coop-title {font-size: 2rem; font-weight: 650; letter-spacing: -0.03em; text-align:center; margin-bottom:.2rem;}
+        .coop-subtitle {text-align:center; color:#6e6e73; margin-bottom:1.2rem; font-size:1rem;}
+        .coop-panel {background:#fbfbfd; border:1px solid #e5e5e7; border-radius:24px; padding:18px; margin:12px 0;}
+        .coop-panel-title {font-size:1rem; font-weight:600; margin-bottom:.75rem; color:#1d1d1f;}
+        .coop-voice {padding:22px;}
+        .coop-voice-hint, .coop-guide, .coop-status, .coop-empty, .coop-help div {color:#3a3a3c; font-size:.96rem; line-height:1.45;}
+        .coop-muted {color:#6e6e73; margin-top:.75rem; text-align:center;}
+        .coop-steps {display:flex; gap:.5rem; flex-wrap:wrap; margin-bottom:.85rem;}
+        .coop-step {padding:.38rem .7rem; border-radius:999px; background:#f1f1f3; color:#6e6e73; font-size:.85rem;}
+        .coop-step.active {background:#111827; color:#fff;}
+        .coop-bubble {border-radius:18px; padding:12px 14px; margin:10px 0; max-width:92%; line-height:1.45;}
+        .coop-bubble.user {background:#111827; color:#fff; margin-left:auto;}
+        .coop-bubble.assistant {background:#f1f1f3; color:#1d1d1f; margin-right:auto;}
+        .coop-bubble-speaker {font-size:.72rem; opacity:.72; margin-bottom:.2rem; text-transform:uppercase; letter-spacing:.04em;}
+        .coop-transcript {white-space:pre-wrap; background:#fff; border:1px solid #ececee; border-radius:18px; padding:12px 14px; min-height:72px; color:#1d1d1f;}
+        .coop-mini-title {margin-top:1rem; margin-bottom:.4rem; font-weight:600; color:#1d1d1f;}
+        .coop-line {display:flex; justify-content:space-between; gap:12px; padding:.34rem 0; border-bottom:1px solid #efeff0; font-size:.95rem;}
+        .coop-line span {color:#6e6e73;}
+        .coop-line strong {color:#1d1d1f; text-align:right;}
+        .stButton>button {border-radius:999px; border:1px solid #d8d8dc; background:#fff; color:#1d1d1f; min-height:44px;}
+        .stButton>button[kind="primary"] {background:#111827; color:#fff; border-color:#111827;}
+        div[data-testid="stTextInputRootElement"] input, div[data-testid="stTextArea"] textarea {border-radius:18px !important; border:1px solid #d8d8dc !important; background:#fff !important;}
         </style>
         """,
         unsafe_allow_html=True,
@@ -1138,31 +1194,23 @@ def render(ctx: Dict[str, Any]) -> None:
         return
 
     st.markdown('<div class="coop-shell">', unsafe_allow_html=True)
-    st.markdown('<div class="coop-headline"><h1>Coop Agent v19</h1></div>', unsafe_allow_html=True)
-    st.markdown('<div class="coop-sub">Hauptmenü · natürlicher KI-Dialog · Menüführung parallel nutzbar</div>', unsafe_allow_html=True)
-    st.markdown('<div class="voice-hint">Bitte sprich deine Projektdaten ein. Alternativ kannst du einen Menüpunkt wählen.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="coop-title">Coop Agent</div>', unsafe_allow_html=True)
+    st.markdown('<div class="coop-subtitle">Sprachgeführte Projektdateneingabe im Stil eines ruhigen, minimalistischen Dialogs.</div>', unsafe_allow_html=True)
+
+    if st.session_state.get("agent_mode") == "home" and not st.session_state.get("agent_messages"):
+        _append("assistant", "Willkommen. Ich führe dich durch das Hauptmenü. Starte mit Neue Eingabe oder sprich direkt mit Coop-Eingabe.")
 
     _render_menu_buttons(ctx)
     _render_menu_guide()
+    _render_voice_capture()
 
     if st.session_state.get("agent_mode") == "capture":
         _render_submenu_buttons()
 
-    if st.session_state.get("agent_help_open"):
-        _render_help_box()
-
     _render_dialog_views()
 
-    if st.session_state.get("agent_last_saved"):
-        info = st.session_state["agent_last_saved"]
-        st.success(f"Gespeichert · DB #{info.get('entry_id')} · Tool: {_norm(info.get('task_id')) or 'kein Aufgabenobjekt'}")
-
-    if st.session_state.get("agent_mode") == "home" and not st.session_state.get("agent_messages"):
-        _append("assistant", "Willkommen im Hauptmenü. Ich führe dich Schritt für Schritt durch das Menü. Starte mit **Neue Eingabe** oder sprich direkt mit **Coop-Eingabe ...**.")
-
-    for msg in st.session_state.get("agent_messages") or []:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+    if st.session_state.get("agent_help_open"):
+        _render_help_box()
 
     _render_summary_box()
     _render_search_result()
@@ -1172,24 +1220,17 @@ def render(ctx: Dict[str, Any]) -> None:
         key=f"agent_prompt_input_{st.session_state.get('agent_prompt_rev', 0)}",
         value=st.session_state.get("agent_prompt_value", ""),
         label_visibility="collapsed",
-        placeholder="Sprich oder schreibe jetzt deinen nächsten Satz im Gespräch mit der KI",
+        placeholder="Schreibe deinen nächsten Satz oder nutze die Spracheingabe oben",
     )
     st.session_state["agent_prompt_value"] = prompt_value
 
-    c1, c2 = st.columns([1, 1.2])
-    if c1.button("Senden", use_container_width=True, type="primary"):
+    send_col, _ = st.columns([1.1, 4])
+    if send_col.button("Senden", use_container_width=True, type="primary"):
         prompt = _norm(prompt_value)
         if prompt:
             _handle_prompt(ctx, prompt)
         _clear_prompt()
         st.rerun()
-    if c2.button("🎙 Mündliche Eingabe starten", use_container_width=True):
-        st.session_state["agent_voice_open"] = not bool(st.session_state.get("agent_voice_open"))
-        if not st.session_state["agent_voice_open"]:
-            _voice_reset()
-        st.rerun()
-
-    _render_voice_capture()
 
     if st.session_state.get("agent_confirm_field"):
         y1, y2 = st.columns(2)
@@ -1201,6 +1242,6 @@ def render(ctx: Dict[str, Any]) -> None:
             st.rerun()
 
     if not _openai_available():
-        st.caption("OpenAI-Sprachtranskription ist noch nicht aktiv. Hinterlege OPENAI_API_KEY in den Streamlit-Secrets.")
+        st.markdown('<div class="coop-muted">OpenAI-Sprachtranskription ist noch nicht aktiv. Hinterlege OPENAI_API_KEY in den Streamlit-Secrets.</div>', unsafe_allow_html=True)
 
     st.markdown('</div>', unsafe_allow_html=True)
