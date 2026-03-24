@@ -261,6 +261,18 @@ def _clear_prompt() -> None:
     st.session_state["agent_prompt_rev"] = int(st.session_state.get("agent_prompt_rev", 0)) + 1
 
 
+def _apply_transcript_to_prompt() -> bool:
+    tr = _norm(st.session_state.get("agent_voice_text_value"))
+    if not tr:
+        return False
+    current = _norm(st.session_state.get("agent_prompt_value"))
+    st.session_state["agent_prompt_value"] = ((current + " " + tr).strip() if current and tr else tr or current)
+    st.session_state["agent_prompt_rev"] = int(st.session_state.get("agent_prompt_rev", 0)) + 1
+    _voice_reset(increment_take=True)
+    st.session_state["agent_voice_open"] = False
+    return True
+
+
 def _voice_reset(increment_take: bool = False) -> None:
     st.session_state["agent_voice_text_value"] = ""
     st.session_state["agent_voice_error"] = ""
@@ -998,6 +1010,7 @@ def _render_input_area(ctx: Dict[str, Any]) -> None:
     rev = int(st.session_state.get("agent_prompt_rev", 0))
     widget_key = f"agent_prompt_widget_{rev}"
     seed_value = st.session_state.get("agent_prompt_value", "")
+    voice_open = bool(st.session_state.get("agent_voice_open"))
 
     input_col, mic_col = st.columns([18, 1.4], vertical_alignment="bottom")
     with input_col:
@@ -1011,24 +1024,48 @@ def _render_input_area(ctx: Dict[str, Any]) -> None:
         )
         st.session_state["agent_prompt_value"] = prompt
     with mic_col:
-        mic_label = "✕" if st.session_state.get("agent_voice_open") else "🎙"
-        if st.button(mic_label, use_container_width=True, key="agent_mic_inline"):
-            if st.session_state.get("agent_voice_open"):
-                _voice_reset(increment_take=True)
-                st.session_state["agent_voice_open"] = False
-            else:
+        if voice_open:
+            st.markdown('<div class="coop-inline-recorder">', unsafe_allow_html=True)
+            audio = st.audio_input(
+                "Aufnahme starten",
+                key=f"agent_voice_audio_{st.session_state.get('agent_voice_take', 0)}",
+                label_visibility="collapsed",
+            )
+            st.markdown('</div>', unsafe_allow_html=True)
+            if audio is not None:
+                _maybe_transcribe_audio(audio)
+                if st.session_state.get("agent_voice_status") == "ready" and _apply_transcript_to_prompt():
+                    st.rerun()
+        else:
+            if st.button("🎙", use_container_width=True, key="agent_mic_inline"):
                 st.session_state["agent_voice_open"] = True
+                st.rerun()
+
+    if voice_open:
+        lower = st.columns([1.15, 1.0, 3.85])
+        if lower[0].button("Senden", use_container_width=True, type="primary", key="agent_send_main"):
+            prompt = _norm(st.session_state.get("agent_prompt_value"))
+            if prompt:
+                _handle_prompt(ctx, prompt)
+            _clear_prompt()
             st.rerun()
-
-    controls = st.columns([1.15, 4.35])
-    if controls[0].button("Senden", use_container_width=True, type="primary", key="agent_send_main"):
-        prompt = _norm(st.session_state.get("agent_prompt_value"))
-        if prompt:
-            _handle_prompt(ctx, prompt)
-        _clear_prompt()
-        st.rerun()
-
-    _render_voice_capture(compact=True)
+        if lower[1].button("✕", use_container_width=True, key="voice_cancel_inline"):
+            _voice_reset(increment_take=True)
+            st.session_state["agent_voice_open"] = False
+            st.rerun()
+        status = st.session_state.get("agent_voice_status")
+        if status == "error":
+            lower[2].caption(_norm(st.session_state.get("agent_voice_error")) or "Transkription fehlgeschlagen.")
+        else:
+            lower[2].caption("Mikro im gleichen Eingabebereich aktiv. Nach Aufnahme wird das Transkript direkt übernommen.")
+    else:
+        controls = st.columns([1.15, 4.35])
+        if controls[0].button("Senden", use_container_width=True, type="primary", key="agent_send_main"):
+            prompt = _norm(st.session_state.get("agent_prompt_value"))
+            if prompt:
+                _handle_prompt(ctx, prompt)
+            _clear_prompt()
+            st.rerun()
 
     if st.session_state.get("agent_confirm_field"):
         y1, y2 = st.columns(2)
@@ -1052,57 +1089,7 @@ def _render_help_box() -> None:
 
 
 def _render_voice_capture(compact: bool = False) -> None:
-    voice_open = bool(st.session_state.get("agent_voice_open"))
-
-    if compact:
-        st.caption("Mikro starten, sprechen, dann mit ✓ direkt in dasselbe Eingabefeld übernehmen.")
-    else:
-        st.markdown("**Mündliche Dateneingabe**")
-        st.caption("Sprich dein Projektupdate ein. Mit ✓ landet das Transkript direkt im normalen Eingabefeld.")
-
-    if voice_open:
-        audio = st.audio_input(
-            "Projektupdate aufnehmen",
-            key=f"agent_voice_audio_{st.session_state.get('agent_voice_take', 0)}",
-            label_visibility="collapsed",
-        )
-        if audio is not None:
-            _maybe_transcribe_audio(audio)
-
-        status = st.session_state.get("agent_voice_status")
-        status_text = "Bereit für Aufnahme."
-        if status == "ready":
-            preview = _norm(st.session_state.get("agent_voice_text_value"))
-            status_text = "Transkript ist da. Mit ✓ wird es ins Eingabefeld übernommen."
-            if preview:
-                status_text += f" Vorschau: {preview[:180]}"
-                if len(preview) > 180:
-                    status_text += " …"
-        elif status == "error":
-            status_text = _norm(st.session_state.get("agent_voice_error")) or "Transkription fehlgeschlagen."
-        elif status == "cached":
-            status_text = "Diese Aufnahme wurde bereits transkribiert."
-        elif status == "transcribing":
-            status_text = "Transkription läuft …"
-        st.caption(status_text)
-
-        action_cols = st.columns([1, 1, 6]) if compact else st.columns([1, 1, 4])
-        if action_cols[0].button("✕", use_container_width=True, key=f"voice_cancel_{'compact' if compact else 'full'}"):
-            _voice_reset(increment_take=True)
-            st.session_state["agent_voice_open"] = False
-            st.rerun()
-        if action_cols[1].button("✓", use_container_width=True, type="primary", key=f"voice_apply_{'compact' if compact else 'full'}"):
-            current = _norm(st.session_state.get("agent_prompt_value"))
-            tr = _norm(st.session_state.get("agent_voice_text_value"))
-            st.session_state["agent_prompt_value"] = ((current + " " + tr).strip() if current and tr else tr or current)
-            st.session_state["agent_prompt_rev"] = int(st.session_state.get("agent_prompt_rev", 0)) + 1
-            _voice_reset(increment_take=True)
-            st.session_state["agent_voice_open"] = False
-            st.rerun()
-
-        if st.session_state.get("agent_voice_debug"):
-            with st.expander("Diagnose", expanded=False):
-                st.json(st.session_state.get("agent_voice_diag") or {})
+    return
 
 def _render_login(ctx: Dict[str, Any]) -> None:
     st.markdown('<div class="coop-center">', unsafe_allow_html=True)
@@ -1191,6 +1178,10 @@ def render(ctx: Dict[str, Any]) -> None:
         .stButton>button[kind="primary"] {background:#111827; color:#fff; border-color:#111827;}
         div[data-testid="stTextInputRootElement"] input, div[data-testid="stTextArea"] textarea {border-radius:18px !important; border:1px solid #d8d8dc !important; background:#fff !important;}
         div[data-testid="stTextInputRootElement"] input {padding-right:3rem !important;}
+        .coop-inline-recorder [data-testid="stAudioInput"] {margin:0 !important;}
+        .coop-inline-recorder [data-testid="stAudioInput"] > label {display:none !important;}
+        .coop-inline-recorder [data-testid="stAudioInput"] button {min-height:44px !important; border-radius:999px !important;}
+        .coop-inline-recorder audio {display:none !important;}
         </style>
         """,
         unsafe_allow_html=True,
