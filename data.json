@@ -1,4 +1,211 @@
-{
-  "schema_version": 5,
-  "series": []
-}
+[
+  {
+    "series_id": "s_20260216210918345764_190_93238885",
+    "title": "Abacus Daten Analyse",
+    "start": "2026-02-16",
+    "end": "2026-02-20",
+    "kind": "task",
+    "is_meta": false,
+    "portfolio": "Reporting",
+    "project": "Client Profatibility",
+    "theme": "General",
+    "owner": "Rainer Tschernitschek",
+    "owner_id": "2",
+    "state": "ACTIVE",
+    "time_start": "",
+    "time_end": "",
+    "location": "",
+    "parts": [],
+    "predecessors": [],
+    "done_days": [
+      "2026-02-16"
+    ],
+    "meta": {}
+  },
+  {
+    "series_id": "s_20260216211000124416_190_96157392",
+    "title": "Budget Analysis",
+    "start": "2026-02-23",
+    "end": "2026-02-27",
+    "kind": "task",
+    "is_meta": false,
+    "portfolio": "Reporting",
+    "project": "Client Profatibility",
+    "theme": "General",
+    "owner": "Rainer Tschernitschek",
+    "owner_id": "2",
+    "state": "PLANNED",
+    "time_start": "",
+    "time_end": "",
+    "location": "",
+    "parts": [],
+    "predecessors": [
+      "s_20260216210918345764_190_93238885"
+    ],
+    "done_days": [
+      "2026-02-24"
+    ],
+    "meta": {}
+  },
+  {
+    "series_id": "s_20260216211105608680_190_2233473",
+    "title": "Client Profatibility Dashboard Draft",
+    "start": "2026-03-09",
+    "end": "2026-03-13",
+    "kind": "task",
+    "is_meta": false,
+    "portfolio": "Reporting",
+    "project": "Client Profatibility",
+    "theme": "General",
+    "owner": "Rainer Tschernitschek",
+    "owner_id": "2",
+    "state": "PLANNED",
+    "time_start": "",
+    "time_end": "",
+    "location": "",
+    "parts": [],
+    "predecessors": [
+      "s_20260216211229160378_190_36721339"
+    ],
+    "done_days": [],
+    "meta": {}
+  },
+  {
+    "series_id": "s_20260216211229160378_190_36721339",
+    "title": "Client Profatibility DB Approval",
+    "start": "2026-03-02",
+    "end": "2026-03-06",
+    "kind": "task",
+    "is_meta": false,
+    "portfolio": "Default",
+    "project": "Client Profatibility",
+    "theme": "internal",
+    "owner": "Sebastian Dicke",
+    "owner_id": "3",
+    "state": "PLANNED",
+    "time_start": "",
+    "time_end": "",
+    "location": "",
+    "parts": [],
+    "predecessors": [
+      "s_20260216211000124416_190_96157392"
+    ],
+    "done_days": [],
+    "meta": {}
+  },
+  {
+    "series_id": "s_20260224064229056270",
+    "title": "Präsentation Coop",
+    "start": "2026-02-24",
+    "end": "2026-02-24",
+    "kind": "appointment",
+    "is_meta": false,
+    "portfolio": "Default",
+    "project": "Präsentation",
+    "theme": "Termin",
+    "owner": "Rainer Tschernitschek",
+    "owner_id": "2",
+    "state": "PLANNED",
+    "time_start": "",
+    "time_end": "",
+    "location": "",
+    "parts": [],
+    "predecessors": [],
+    "done_days": [],
+    "meta": {
+      "notes": ""
+    }
+  },
+  {
+    "series_id": "s_20260303043030841818",
+    "title": "Einschulung BPMN Zeichnen",
+    "start": "2026-03-09",
+    "end": "2026-03-13",
+    "kind": "task",
+    "is_meta": false,
+    "portfolio": "Training",
+    "project": "Process Analysis",
+    "theme": "internal",
+    "owner": "Rainer Tschernitschek",
+    "owner_id": "2",
+    "state": "PLANNED",
+    "time_start": "",
+    "time_end": "",
+    "location": "",
+    "parts": [],
+    "predecessors": [],
+    "done_days": [],
+    "meta": {}
+  },
+  {
+    "series_id": "s_20260303043155861094",
+    "title": "Digi Prozess zeichnen",
+    "start": "2026-03-16",
+    "end": "2026-03-20",
+    "kind": "task",
+    "is_meta": false,
+    "portfolio": "Reporting",
+    "project": "Process Analysis",
+    "theme": "internal",
+    "owner": "Alina Punz",
+    "owner_id": "1",
+    "state": "PLANNED",
+    "time_start": "",
+    "time_end": "",
+    "location": "",
+    "parts": [],
+    "predecessors": [],
+    "done_days": [],
+    "meta": {}
+  },
+  {
+    "series_id": "s_20260303043254849221",
+    "title": "Digi Prozess zeichnen",
+    "start": "2026-03-16",
+    "end": "2026-03-20",
+    "kind": "task",
+    "is_meta": false,
+    "portfolio": "Reporting",
+    "project": "Process Analysis",
+    "theme": "internal",
+    "owner": "Regina Kriechbaum",
+    "owner_id": "7",
+    "state": "PLANNED",
+    "time_start": "",
+    "time_end": "",
+    "location": "",
+    "parts": [],
+    "predecessors": [],
+    "done_days": [],
+    "meta": {}
+  },
+  {
+    "series_id": "s_20260303043355135415",
+    "title": "Digi Prozess überarbeiten",
+    "start": "2026-04-06",
+    "end": "2026-04-10",
+    "kind": "task",
+    "is_meta": false,
+    "portfolio": "Reporting",
+    "project": "Process Analysis",
+    "theme": "internal",
+    "owner": "Rainer Tschernitschek",
+    "owner_id": "2",
+    "state": "PLANNED",
+    "time_start": "",
+    "time_end": "",
+    "location": "",
+    "parts": [],
+    "predecessors": [
+      "s_20260303043155861094",
+      "s_20260303043254849221"
+    ],
+    "done_days": [],
+    "meta": {
+      "predecessors": [
+        "s_20260303043155861094",
+        "s_20260303043254849221"
+      ]
+    }
+  }
+]

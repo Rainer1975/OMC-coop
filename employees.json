@@ -1,4 +1,68 @@
 {
   "schema_version": 1,
-  "employees": []
+  "employees": [
+    {
+      "id": "1",
+      "display_name": "Alina Punz",
+      "aliases": [
+        "Alina Punz",
+        "1"
+      ]
+    },
+    {
+      "id": "4",
+      "display_name": "Andrea Tenner",
+      "aliases": [
+        "Andrea Tenner",
+        "4"
+      ]
+    },
+    {
+      "id": "6",
+      "display_name": "Andreas Adolf",
+      "aliases": [
+        "Andreas Adolf",
+        "6"
+      ]
+    },
+    {
+      "id": "5",
+      "display_name": "Ben Steudler",
+      "aliases": [
+        "Ben Steudler",
+        "5"
+      ]
+    },
+    {
+      "id": "8",
+      "display_name": "Patrick Stepanian",
+      "aliases": [
+        "Patrick Stepanian"
+      ]
+    },
+    {
+      "id": "2",
+      "display_name": "Rainer Tschernitschek",
+      "aliases": [
+        "Rainer Tschernitschek",
+        "2"
+      ]
+    },
+    {
+      "id": "7",
+      "display_name": "Regina Kriechbaum",
+      "aliases": [
+        "Regina Kriechbaum",
+        "7"
+      ]
+    },
+    {
+      "id": "3",
+      "display_name": "Sebastian Dicke",
+      "aliases": [
+        "Sebastian Dicke",
+        "3"
+      ]
+    }
+  ]
 }

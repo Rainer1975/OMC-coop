@@ -1,7 +1,17 @@
 {
   "portfolios": [
-    "Default"
+    "Default",
+    "Reporting",
+    "Training"
   ],
-  "projects": [],
-  "themes": []
+  "projects": [
+    "Client Profatibility",
+    "Process Analysis",
+    "Präsentation"
+  ],
+  "themes": [
+    "General",
+    "Termin",
+    "internal"
+  ]
 }
