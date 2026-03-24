@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import streamlit as st
 from core import new_series
 
-__version__ = "2026.03.24.21"
+__version__ = "2026.03.24.22"
 
 DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -1011,8 +1011,8 @@ def _render_search_result() -> None:
 
 
 def _render_input_area(ctx: Dict[str, Any]) -> None:
-    left, right = st.columns([1.25, 0.85], vertical_alignment="top")
-    with left:
+    input_col, mic_col = st.columns([18, 1.4], vertical_alignment="center")
+    with input_col:
         prompt_value = st.text_input(
             "Coop Prompt",
             key=f"agent_prompt_input_{st.session_state.get('agent_prompt_rev', 0)}",
@@ -1021,25 +1021,35 @@ def _render_input_area(ctx: Dict[str, Any]) -> None:
             placeholder="Sprich oder schreibe deinen nächsten Satz …",
         )
         st.session_state["agent_prompt_value"] = prompt_value
-
-        send_col, filler = st.columns([1.05, 3.5])
-        if send_col.button("Senden", use_container_width=True, type="primary", key="agent_send_main"):
-            prompt = _norm(prompt_value)
-            if prompt:
-                _handle_prompt(ctx, prompt)
-            _clear_prompt()
+    with mic_col:
+        mic_label = "✕" if st.session_state.get("agent_voice_open") else "🎙"
+        if st.button(mic_label, use_container_width=True, key="agent_mic_inline"):
+            if st.session_state.get("agent_voice_open"):
+                _voice_reset(increment_take=True)
+                st.session_state["agent_voice_open"] = False
+            else:
+                st.session_state["agent_voice_open"] = True
             st.rerun()
 
-        if st.session_state.get("agent_confirm_field"):
-            y1, y2 = st.columns(2)
-            if y1.button("Ja, stimmt", use_container_width=True, key="confirm_yes_main"):
-                _accept_confirmed_value()
-                st.rerun()
-            if y2.button("Nein, korrigieren", use_container_width=True, key="confirm_no_main"):
-                _reject_confirmed_value()
-                st.rerun()
-    with right:
+    send_col, filler = st.columns([1.05, 3.5])
+    if send_col.button("Senden", use_container_width=True, type="primary", key="agent_send_main"):
+        prompt = _norm(prompt_value)
+        if prompt:
+            _handle_prompt(ctx, prompt)
+        _clear_prompt()
+        st.rerun()
+
+    if st.session_state.get("agent_voice_open"):
         _render_voice_capture(compact=True)
+
+    if st.session_state.get("agent_confirm_field"):
+        y1, y2 = st.columns(2)
+        if y1.button("Ja, stimmt", use_container_width=True, key="confirm_yes_main"):
+            _accept_confirmed_value()
+            st.rerun()
+        if y2.button("Nein, korrigieren", use_container_width=True, key="confirm_no_main"):
+            _reject_confirmed_value()
+            st.rerun()
 
 
 def _render_help_box() -> None:
@@ -1064,27 +1074,12 @@ def _render_voice_capture(compact: bool = False) -> None:
     voice_open = bool(st.session_state.get("agent_voice_open"))
     panel_class = "coop-panel coop-voice compact" if compact else "coop-panel coop-voice"
     st.markdown(f'<div class="{panel_class}">', unsafe_allow_html=True)
+
     if compact:
-        st.markdown('<div class="coop-panel-title">Spracheingabe</div>', unsafe_allow_html=True)
-        st.markdown('<div class="coop-voice-hint">Sprich dein Update ein. Das Transkript erscheint direkt hier und kann ins Gespräch übernommen werden.</div>', unsafe_allow_html=True)
-        cols = st.columns([1.15, 1, .85])
-        open_label = "Öffnen" if not voice_open else "Aufnahme aktiv"
+        st.markdown('<div class="coop-voice-hint">Sprich dein Update ein. Mit ✕ verwirfst du die Aufnahme, mit ✓ übernimmst du das Transkript.</div>', unsafe_allow_html=True)
     else:
         st.markdown('<div class="coop-panel-title">Mündliche Dateneingabe</div>', unsafe_allow_html=True)
         st.markdown('<div class="coop-voice-hint">Bitte sprich dein Projektupdate ein. Die Spracheingabe ist der Primärmodus.</div>', unsafe_allow_html=True)
-        cols = st.columns([1.4, 1, 1])
-        open_label = "Spracheingabe öffnen" if not voice_open else "Aufnahme aktiv"
-
-    if cols[0].button(open_label, use_container_width=True, type="primary", key=f"voice_open_{'compact' if compact else 'full'}"):
-        st.session_state["agent_voice_open"] = True
-        st.rerun()
-    if cols[1].button("Neu aufnehmen", use_container_width=True, key=f"voice_reset_{'compact' if compact else 'full'}"):
-        _voice_reset(increment_take=True)
-        st.session_state["agent_voice_open"] = True
-        st.rerun()
-    if cols[2].button("Schließen", use_container_width=True, key=f"voice_close_{'compact' if compact else 'full'}"):
-        st.session_state["agent_voice_open"] = False
-        st.rerun()
 
     if voice_open:
         audio = st.audio_input(
@@ -1100,7 +1095,7 @@ def _render_voice_capture(compact: bool = False) -> None:
         status = st.session_state.get("agent_voice_status")
         status_text = "Bereit für Aufnahme."
         if status == "ready":
-            status_text = "Transkript ist da. Du kannst es prüfen und ins Gespräch übernehmen."
+            status_text = "Transkript ist da. Prüfe es und übernimm es mit ✓."
         elif status == "error":
             status_text = _norm(st.session_state.get("agent_voice_error")) or "Transkription fehlgeschlagen."
         elif status == "cached":
@@ -1112,27 +1107,32 @@ def _render_voice_capture(compact: bool = False) -> None:
         voice_text = st.text_area(
             "Transkript",
             value=st.session_state.get("agent_voice_text_value", ""),
-            height=150 if compact else 160,
+            height=120 if compact else 160,
             placeholder="Hier erscheint das Transkript. Du kannst es direkt korrigieren.",
             label_visibility="collapsed",
             key=f"agent_voice_text_area_{'compact' if compact else 'full'}_{st.session_state.get('agent_voice_take', 0)}"
         )
         st.session_state["agent_voice_text_value"] = voice_text
 
-        if st.button("Transkript ins Gespräch übernehmen", use_container_width=True, key=f"voice_apply_{'compact' if compact else 'full'}"):
+        action_cols = st.columns([1,1,6]) if compact else st.columns([1,1,4])
+        if action_cols[0].button("✕", use_container_width=True, key=f"voice_cancel_{'compact' if compact else 'full'}"):
+            _voice_reset(increment_take=True)
+            st.session_state["agent_voice_open"] = False
+            st.rerun()
+        if action_cols[1].button("✓", use_container_width=True, type="primary", key=f"voice_apply_{'compact' if compact else 'full'}"):
             current = _norm(st.session_state.get("agent_prompt_value"))
             tr = _norm(voice_text)
             st.session_state["agent_prompt_value"] = ((current + " " + tr).strip() if current and tr else tr or current)
             st.session_state["agent_prompt_rev"] = int(st.session_state.get("agent_prompt_rev", 0)) + 1
-            st.session_state["agent_voice_open"] = False
             _voice_reset(increment_take=True)
+            st.session_state["agent_voice_open"] = False
             st.rerun()
 
         if st.session_state.get("agent_voice_debug"):
             with st.expander("Diagnose", expanded=False):
                 st.json(st.session_state.get("agent_voice_diag") or {})
     else:
-        st.markdown('<div class="coop-empty">Öffne hier die Spracheingabe. Sie bleibt direkt neben dem Dialog und dem Eingabefeld.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="coop-empty">Tippe auf das Mikrofon rechts neben dem Eingabefeld, um die Spracheingabe zu öffnen.</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
 def _render_login(ctx: Dict[str, Any]) -> None:
@@ -1211,7 +1211,7 @@ def render(ctx: Dict[str, Any]) -> None:
         .coop-panel {background:#fbfbfd; border:1px solid #e5e5e7; border-radius:24px; padding:18px; margin:12px 0;}
         .coop-panel-title {font-size:1rem; font-weight:600; margin-bottom:.75rem; color:#1d1d1f;}
         .coop-voice {padding:22px;}
-        .coop-voice.compact {padding:16px; position:sticky; top:16px;}
+        .coop-voice.compact {padding:14px 16px; margin-top:.55rem;}
         .coop-voice-hint, .coop-guide, .coop-status, .coop-empty, .coop-help div {color:#3a3a3c; font-size:.96rem; line-height:1.45;}
         .coop-muted {color:#6e6e73; margin-top:.75rem; text-align:center;}
         .coop-steps {display:flex; gap:.5rem; flex-wrap:wrap; margin-bottom:.85rem;}
@@ -1226,9 +1226,10 @@ def render(ctx: Dict[str, Any]) -> None:
         .coop-line {display:flex; justify-content:space-between; gap:12px; padding:.34rem 0; border-bottom:1px solid #efeff0; font-size:.95rem;}
         .coop-line span {color:#6e6e73;}
         .coop-line strong {color:#1d1d1f; text-align:right;}
-        .stButton>button {border-radius:999px; border:1px solid #d8d8dc; background:#fff; color:#1d1d1f; min-height:44px;}
+        .stButton>button {border-radius:999px; border:1px solid #d8d8dc; background:#fff; color:#1d1d1f; min-height:44px; box-shadow:none;}
         .stButton>button[kind="primary"] {background:#111827; color:#fff; border-color:#111827;}
         div[data-testid="stTextInputRootElement"] input, div[data-testid="stTextArea"] textarea {border-radius:18px !important; border:1px solid #d8d8dc !important; background:#fff !important;}
+        div[data-testid="stTextInputRootElement"] input {padding-right:3rem !important;}
         </style>
         """,
         unsafe_allow_html=True,
