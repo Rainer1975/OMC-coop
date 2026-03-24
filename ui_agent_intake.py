@@ -261,6 +261,7 @@ def _clear_prompt() -> None:
     st.session_state["agent_prompt_rev"] = int(st.session_state.get("agent_prompt_rev", 0)) + 1
 
 
+
 def _apply_transcript_to_prompt() -> bool:
     tr = _norm(st.session_state.get("agent_voice_text_value"))
     if not tr:
@@ -421,24 +422,16 @@ def _render_menu_guide() -> None:
 
 
 def _render_dialog_views() -> None:
-    draft = st.session_state.get("agent_draft") or {}
-    st.markdown("**Gespräch**")
     msgs = st.session_state.get("agent_messages") or []
     if not msgs:
-        st.caption("Hier erscheint der sichtbare Dialog zwischen dir und der KI.")
-    for msg in msgs[-10:]:
+        st.caption("Hier erscheint der Dialog chronologisch untereinander.")
+        return
+    for msg in msgs:
         role = msg.get("role")
         cls = "user" if role == "user" else "assistant"
         speaker = "Du" if role == "user" else "KI"
         content = _norm(msg.get("content"))
         st.markdown(f'<div class="coop-bubble {cls}"><div class="coop-bubble-speaker">{speaker}</div><div>{content}</div></div>', unsafe_allow_html=True)
-    if draft:
-        with st.expander("Bisher notiert", expanded=False):
-            for field in _field_order():
-                value = _norm(draft.get(field))
-                if value or field in (st.session_state.get("agent_history_fields") or []):
-                    display = value or "keine"
-                    st.markdown(f'**{FIELD_LABELS.get(field, field)}:** {display}')
 
 def _project_options(ctx: Dict[str, Any]) -> List[str]:
     projects = []
@@ -1012,26 +1005,24 @@ def _render_input_area(ctx: Dict[str, Any]) -> None:
     seed_value = st.session_state.get("agent_prompt_value", "")
     voice_open = bool(st.session_state.get("agent_voice_open"))
 
-    input_col, mic_col = st.columns([18, 1.4], vertical_alignment="bottom")
-    with input_col:
+    top = st.columns([12, 1.2, 1.7], vertical_alignment="bottom")
+    with top[0]:
         prompt = st.text_area(
-            "Coop Prompt",
+            "Nachricht",
             key=widget_key,
             value=seed_value,
-            height=108,
+            height=110,
             label_visibility="collapsed",
-            placeholder="Sprich oder schreibe dein Update hier hinein …",
+            placeholder="Schreibe dein Update oder nutze das Mikrofon …",
         )
         st.session_state["agent_prompt_value"] = prompt
-    with mic_col:
+    with top[1]:
         if voice_open:
-            st.markdown('<div class="coop-inline-recorder">', unsafe_allow_html=True)
             audio = st.audio_input(
-                "Aufnahme starten",
+                "Aufnahme",
                 key=f"agent_voice_audio_{st.session_state.get('agent_voice_take', 0)}",
                 label_visibility="collapsed",
             )
-            st.markdown('</div>', unsafe_allow_html=True)
             if audio is not None:
                 _maybe_transcribe_audio(audio)
                 if st.session_state.get("agent_voice_status") == "ready" and _apply_transcript_to_prompt():
@@ -1040,42 +1031,34 @@ def _render_input_area(ctx: Dict[str, Any]) -> None:
             if st.button("🎙", use_container_width=True, key="agent_mic_inline"):
                 st.session_state["agent_voice_open"] = True
                 st.rerun()
-
-    if voice_open:
-        lower = st.columns([1.15, 1.0, 3.85])
-        if lower[0].button("Senden", use_container_width=True, type="primary", key="agent_send_main"):
+    with top[2]:
+        if st.button("Senden", use_container_width=True, type="primary", key="agent_send_main"):
             prompt = _norm(st.session_state.get("agent_prompt_value"))
             if prompt:
                 _handle_prompt(ctx, prompt)
             _clear_prompt()
             st.rerun()
-        if lower[1].button("✕", use_container_width=True, key="voice_cancel_inline"):
+
+    if voice_open:
+        row = st.columns([1.5, 5])
+        if row[0].button("Abbrechen", use_container_width=True, key="voice_cancel_inline"):
             _voice_reset(increment_take=True)
             st.session_state["agent_voice_open"] = False
             st.rerun()
         status = st.session_state.get("agent_voice_status")
         if status == "error":
-            lower[2].caption(_norm(st.session_state.get("agent_voice_error")) or "Transkription fehlgeschlagen.")
+            row[1].caption(_norm(st.session_state.get("agent_voice_error")) or "Transkription fehlgeschlagen.")
         else:
-            lower[2].caption("Mikro im gleichen Eingabebereich aktiv. Nach Aufnahme wird das Transkript direkt übernommen.")
-    else:
-        controls = st.columns([1.15, 4.35])
-        if controls[0].button("Senden", use_container_width=True, type="primary", key="agent_send_main"):
-            prompt = _norm(st.session_state.get("agent_prompt_value"))
-            if prompt:
-                _handle_prompt(ctx, prompt)
-            _clear_prompt()
-            st.rerun()
+            row[1].caption("Aufnahme läuft im selben Eingabebereich. Nach Abschluss wird der Text direkt übernommen.")
 
     if st.session_state.get("agent_confirm_field"):
         y1, y2 = st.columns(2)
-        if y1.button("Ja, stimmt", use_container_width=True, key="confirm_yes_main"):
+        if y1.button("Ja", use_container_width=True, key="confirm_yes_main"):
             _accept_confirmed_value()
             st.rerun()
-        if y2.button("Nein, korrigieren", use_container_width=True, key="confirm_no_main"):
+        if y2.button("Korrigieren", use_container_width=True, key="confirm_no_main"):
             _reject_confirmed_value()
             st.rerun()
-
 
 def _render_help_box() -> None:
     with st.expander("Hilfe", expanded=True):
@@ -1155,33 +1138,20 @@ def render(ctx: Dict[str, Any]) -> None:
         """
         <style>
         [data-testid="stSidebar"], header[data-testid="stHeader"] {display:none !important;}
-        .block-container {padding-top: 1.5rem; max-width: 1040px;}
+        .block-container {padding-top: 1.2rem; max-width: 900px;}
         .coop-center {max-width: 520px; margin: 16vh auto 0 auto; text-align:center;}
-        .coop-shell {max-width: 1120px; margin: 0 auto;}
-        .coop-title {font-size: 2rem; font-weight: 650; letter-spacing: -0.03em; text-align:center; margin-bottom:.2rem;}
-        .coop-subtitle {text-align:center; color:#6e6e73; margin-bottom:1.2rem; font-size:1rem;}
-                                        .coop-voice-hint, .coop-guide, .coop-status, .coop-empty, .coop-help div {color:#3a3a3c; font-size:.96rem; line-height:1.45;}
+        .coop-shell {max-width: 900px; margin: 0 auto;}
+        .coop-title {font-size: 1.8rem; font-weight: 650; letter-spacing: -0.03em; text-align:center; margin-bottom:.9rem;}
         .coop-muted {color:#6e6e73; margin-top:.75rem; text-align:center;}
-        .coop-steps {display:flex; gap:.5rem; flex-wrap:wrap; margin-bottom:.85rem;}
-        .coop-step {padding:.38rem .7rem; border-radius:999px; background:#f1f1f3; color:#6e6e73; font-size:.85rem;}
-        .coop-step.active {background:#111827; color:#fff;}
+        .coop-toolbar {margin-bottom: 1rem;}
         .coop-bubble {border-radius:18px; padding:12px 14px; margin:10px 0; max-width:92%; line-height:1.45;}
         .coop-bubble.user {background:#111827; color:#fff; margin-left:auto;}
         .coop-bubble.assistant {background:#f1f1f3; color:#1d1d1f; margin-right:auto;}
         .coop-bubble-speaker {font-size:.72rem; opacity:.72; margin-bottom:.2rem; text-transform:uppercase; letter-spacing:.04em;}
-        .coop-transcript {white-space:pre-wrap; background:#fff; border:1px solid #ececee; border-radius:18px; padding:12px 14px; min-height:72px; color:#1d1d1f;}
-        .coop-mini-title {margin-top:1rem; margin-bottom:.4rem; font-weight:600; color:#1d1d1f;}
-        .coop-line {display:flex; justify-content:space-between; gap:12px; padding:.34rem 0; border-bottom:1px solid #efeff0; font-size:.95rem;}
-        .coop-line span {color:#6e6e73;}
-        .coop-line strong {color:#1d1d1f; text-align:right;}
         .stButton>button {border-radius:999px; border:1px solid #d8d8dc; background:#fff; color:#1d1d1f; min-height:44px; box-shadow:none;}
         .stButton>button[kind="primary"] {background:#111827; color:#fff; border-color:#111827;}
-        div[data-testid="stTextInputRootElement"] input, div[data-testid="stTextArea"] textarea {border-radius:18px !important; border:1px solid #d8d8dc !important; background:#fff !important;}
-        div[data-testid="stTextInputRootElement"] input {padding-right:3rem !important;}
-        .coop-inline-recorder [data-testid="stAudioInput"] {margin:0 !important;}
-        .coop-inline-recorder [data-testid="stAudioInput"] > label {display:none !important;}
-        .coop-inline-recorder [data-testid="stAudioInput"] button {min-height:44px !important; border-radius:999px !important;}
-        .coop-inline-recorder audio {display:none !important;}
+        div[data-testid="stTextArea"] textarea {border-radius:18px !important; border:1px solid #d8d8dc !important; background:#fff !important;}
+        [data-testid="stAudioInput"] audio {display:none !important;}
         </style>
         """,
         unsafe_allow_html=True,
@@ -1193,27 +1163,37 @@ def render(ctx: Dict[str, Any]) -> None:
 
     st.markdown('<div class="coop-shell">', unsafe_allow_html=True)
     st.markdown('<div class="coop-title">Coop Agent</div>', unsafe_allow_html=True)
-    st.markdown('<div class="coop-subtitle">Sprachgeführte Projektdateneingabe im Stil eines ruhigen, minimalistischen Dialogs.</div>', unsafe_allow_html=True)
 
-    if st.session_state.get("agent_mode") == "home" and not st.session_state.get("agent_messages"):
-        _append("assistant", "Willkommen. Ich führe dich durch das Hauptmenü. Starte mit Neue Eingabe oder sprich direkt mit Coop-Eingabe.")
+    if not st.session_state.get("agent_messages"):
+        _append("assistant", "Willkommen. Lege ein neues Projekt an, starte eine neue Eingabe oder suche nach einem bestehenden Projekt.")
 
-    _render_menu_buttons(ctx)
-    _render_menu_guide()
-
-    if st.session_state.get("agent_mode") == "capture":
-        _render_submenu_buttons()
+    toolbar = st.columns([1.2, 1.2, 1.2, 1.2])
+    if toolbar[0].button("Neue Eingabe", use_container_width=True, type="primary"):
+        _begin_new_capture(ctx=ctx)
+        st.rerun()
+    if toolbar[1].button("Zusammenfassung", use_container_width=True):
+        _show_summary()
+        st.rerun()
+    if toolbar[2].button("Suche", use_container_width=True):
+        st.session_state["agent_menu"] = "search"
+        _append("assistant", "Suche mit ‚Hey Projekt …‘ nach bestehenden Informationen.")
+        st.rerun()
+    if toolbar[3].button("Abmelden", use_container_width=True):
+        st.session_state["agent_auth_profile"] = None
+        _reset_dialog(keep_user=False)
+        st.rerun()
 
     _render_dialog_views()
     _render_input_area(ctx)
 
+    if st.session_state.get("agent_menu") == "summary":
+        _render_summary_box()
+    if st.session_state.get("agent_menu") == "search":
+        _render_search_result()
     if st.session_state.get("agent_help_open"):
         _render_help_box()
 
-    _render_summary_box()
-    _render_search_result()
-
     if not _openai_available():
-        st.markdown('<div class="coop-muted">OpenAI-Sprachtranskription ist noch nicht aktiv. Hinterlege OPENAI_API_KEY in den Streamlit-Secrets.</div>', unsafe_allow_html=True)
+        st.caption("OpenAI-Sprachtranskription ist noch nicht aktiv. Hinterlege OPENAI_API_KEY in den Streamlit-Secrets.")
 
     st.markdown('</div>', unsafe_allow_html=True)
